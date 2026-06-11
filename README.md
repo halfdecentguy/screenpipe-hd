@@ -7,7 +7,7 @@ Personal build-and-run setup for [screenpipe](https://github.com/screenpipe/scre
 | file | purpose |
 |---|---|
 | `com.bogdan.screenpipe.plist` | launchd agent running the source-built CLI: telemetry off, 14-day media retention, pause on DRM content, `whisper-large-v3-turbo-quantized` with EN/RU/UK, password-manager windows ignored. |
-| `update.sh` | Manual updater. Reads the rolling `cli-latest` GitHub **release title** (the tag itself is stale — the release workflow re-uploads assets without moving it), finds the matching commit on `origin/main` by `Cargo.toml` version, rebuilds with `metal,apple-intelligence` at `-j 4` (full-parallelism fat-LTO builds have frozen this machine), re-signs with the stable `screenpipe-personal` codesigning identity so the TCC Screen Recording grant survives the rebuild, then kickstarts the agent and verifies `/health` `frame_status`. |
+| `update.sh` | Manual updater. Reads the rolling `cli-latest` GitHub **release title** (the tag itself is stale — the release workflow re-uploads assets without moving it), finds the matching commit on upstream main by `Cargo.toml` version (fetched ad hoc by URL — the checkout's `origin` is the personal fork `halfdecentguy/screenpipe`), rebuilds with `metal,apple-intelligence` at `-j 4` (full-parallelism fat-LTO builds have frozen this machine), re-signs with the stable `screenpipe-personal` codesigning identity so the TCC Screen Recording grant survives the rebuild, then kickstarts the agent and verifies `/health` `frame_status`. |
 | `screenpipe-hd.html` | Hub report of the upstream monorepo — architecture, subsystems, activity, and risk register. Snapshot 2026-06-11 at `1a99c64aa` (app v2.5.31 / crates v0.4.17). |
 
 ## Install

@@ -34,13 +34,16 @@ if [ "$newest" = "$current" ]; then
 fi
 
 echo "new release found — locating source commit for v$latest..."
-GIT_LFS_SKIP_SMUDGE=1 git fetch origin main --quiet
+# origin is the personal fork (halfdecentguy/screenpipe), which doesn't get
+# new upstream commits on its own. Fetch upstream main ad hoc by URL — no
+# configured remote — and search FETCH_HEAD for the release commit.
+GIT_LFS_SKIP_SMUDGE=1 git fetch https://github.com/screenpipe/screenpipe.git main --quiet
 sha=""
-for c in $(git log origin/main -n 100 --format=%H -- Cargo.toml); do
+for c in $(git log FETCH_HEAD -n 100 --format=%H -- Cargo.toml); do
     v="$(git show "$c:Cargo.toml" 2>/dev/null | sed -nE 's/^version *= *"([^"]+)".*/\1/p' | head -1)"
     if [ "$v" = "$latest" ]; then sha="$c"; break; fi
 done
-[ -z "$sha" ] && { echo "error: no commit on origin/main has Cargo.toml version $latest; aborting (tag/release scheme may have changed — inspect manually)"; exit 1; }
+[ -z "$sha" ] && { echo "error: no commit on upstream main has Cargo.toml version $latest; aborting (tag/release scheme may have changed — inspect manually)"; exit 1; }
 
 echo "building v$latest at $sha (this takes 30-60 min)..."
 GIT_LFS_SKIP_SMUDGE=1 git checkout --quiet "$sha"
