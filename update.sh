@@ -1,66 +1,70 @@
 #!/usr/bin/env bash
 # update.sh — personal screenpipe source-build updater. Run manually.
 #
-# Checks the rolling "cli-latest" GitHub release for a new CLI version,
-# and ONLY on a new release: pins the matching source commit, rebuilds,
-# and restarts the launchd agent.
+# Builds the personal FORK's main branch (halfdecentguy/screenpipe-hd),
+# which carries fork-only features (incognito audio suppression) on top
+# of upstream. This script never looks at upstream: pulling a new
+# upstream release INTO fork main is a deliberate manual step —
 #
-# Why not compare git tags? The project's `cli-latest` tag is stale (the
-# release workflow re-uploads assets without moving the tag), so the
-# release TITLE ("CLI vX.Y.Z") is the only reliable version signal. We
-# then locate the newest commit on origin/main whose root Cargo.toml
-# version matches that release.
+#   cd ~/projects/Personal/screenpipe
+#   GIT_LFS_SKIP_SMUDGE=1 git fetch https://github.com/screenpipe/screenpipe.git main
+#   git merge FETCH_HEAD        # resolve conflicts if any
+#   git push origin main
+#
+# — after which running this script deploys it. (Finding the commit for a
+# CLI release: the `cli-latest` tag is stale by design; match the release
+# TITLE version against Cargo.toml on upstream main. See the git history
+# of this script for the automated version of that dance.)
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Fixed path: this script lives in the setup repo, not the checkout.
+REPO_DIR="$HOME/projects/Personal/screenpipe"
 BIN="$REPO_DIR/target/release/screenpipe"
 LABEL="com.bogdan.screenpipe"
-API="https://api.github.com/repos/screenpipe/screenpipe/releases/tags/cli-latest"
 
 cd "$REPO_DIR"
 export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$PATH"
 
-current="$("$BIN" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
-[ -z "$current" ] && { echo "warning: no working binary at $BIN; treating as 0.0.0"; current="0.0.0"; }
+echo "fetching fork main..."
+GIT_LFS_SKIP_SMUDGE=1 git fetch origin main --quiet
 
-latest="$(curl -fsSL "$API" | jq -r '.name' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
-[ -z "$latest" ] && { echo "error: could not read latest CLI version from GitHub"; exit 1; }
-
-echo "installed: v$current   latest release: v$latest"
-newest="$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -1)"
-if [ "$newest" = "$current" ]; then
-    echo "up to date — nothing to do."
+if [ "$(git rev-parse HEAD)" = "$(git rev-parse FETCH_HEAD)" ] \
+    && [ -x "$BIN" ] \
+    && [ "$(stat -f %m "$BIN")" -ge "$(git log -1 --format=%ct HEAD)" ]; then
+    echo "binary already built from fork main $(git rev-parse --short HEAD) — nothing to do."
     exit 0
 fi
 
-echo "new release found — locating source commit for v$latest..."
-# origin is the personal fork (halfdecentguy/screenpipe), which doesn't get
-# new upstream commits on its own. Fetch upstream main ad hoc by URL — no
-# configured remote — and search FETCH_HEAD for the release commit.
-GIT_LFS_SKIP_SMUDGE=1 git fetch https://github.com/screenpipe/screenpipe.git main --quiet
-sha=""
-for c in $(git log FETCH_HEAD -n 100 --format=%H -- Cargo.toml); do
-    v="$(git show "$c:Cargo.toml" 2>/dev/null | sed -nE 's/^version *= *"([^"]+)".*/\1/p' | head -1)"
-    if [ "$v" = "$latest" ]; then sha="$c"; break; fi
-done
-[ -z "$sha" ] && { echo "error: no commit on upstream main has Cargo.toml version $latest; aborting (tag/release scheme may have changed — inspect manually)"; exit 1; }
+# --ff-only: never rewrite local history (other agents work in this repo).
+# If this fails, local main has unpushed commits — reconcile manually.
+git checkout --quiet main
+git merge --ff-only FETCH_HEAD
 
-echo "building v$latest at $sha (this takes 30-60 min)..."
-GIT_LFS_SKIP_SMUDGE=1 git checkout --quiet "$sha"
+echo "building fork main $(git rev-parse --short HEAD) (incremental: ~10 min; clean: 30-60 min)..."
 
 export PKG_CONFIG_PATH="/opt/homebrew/opt/ffmpeg/lib/pkgconfig"
 export CFLAGS='-mcpu=apple-m1 -U__ARM_FEATURE_MATMUL_INT8'
 export CXXFLAGS='-mcpu=apple-m1 -U__ARM_FEATURE_MATMUL_INT8'
+# Apple clang 21 rejects whisper.cpp's -mcpu=native; SOURCE_DATE_EPOCH
+# makes ggml default GGML_NATIVE off. If a configure already failed once,
+# also: rm -rf target/release/build/whisper-rs-sys-*  (cmake caches it).
+export SOURCE_DATE_EPOCH=0
+export CMAKE_BUILD_PARALLEL_LEVEL=4
+# thin LTO: memwatch SIGKILLs the fat-LTO link (~7.8 GB > its 6144 MB
+# line). Do NOT remove this or pause memwatch to build.
+export CARGO_PROFILE_RELEASE_LTO=thin
 # -j 4: this machine has 16 GB RAM; fat-LTO release builds at full
 # parallelism have frozen it before. Do not raise.
 nice -n 10 cargo build --release -j 4 -p screenpipe-engine --bin screenpipe --features metal,apple-intelligence
 
 built="$("$BIN" --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
-echo "built v$built"
+echo "built v$built at $(git rev-parse --short HEAD)"
 
 # Re-sign with the stable personal identity so TCC grants survive the rebuild.
 # Cargo's linker signs ad-hoc, which is hash-keyed in TCC: every rebuild
 # silently revokes Screen Recording. A stable cert + identifier keeps it.
+# NOTE: codesign may block on a keychain dialog for the key unless
+# "Always Allow" was clicked once — if this hangs, look at the screen.
 if security find-identity -v -p codesigning | grep -q "screenpipe-personal"; then
     codesign --force --sign screenpipe-personal --identifier com.bogdan.screenpipe "$BIN"
     echo "re-signed binary with stable identity 'screenpipe-personal'"
