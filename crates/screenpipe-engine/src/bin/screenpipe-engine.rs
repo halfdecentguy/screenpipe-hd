@@ -915,6 +915,11 @@ async fn main() -> anyhow::Result<()> {
     // accessibility transitions and confirms restorations across all three.
     let _permission_monitor_handle = screenpipe_engine::permission_monitor::start();
 
+    // Incognito presence monitor: keeps audio transcription suppressed while
+    // an incognito browser window is open (±5min) and purges transcripts from
+    // the suppression window.
+    let _incognito_monitor_handle = screenpipe_engine::start_incognito_monitor(db.clone());
+
     // Start cloud sync service if enabled
     let sync_service_handle = if record_args.enable_sync {
         match start_sync_service(&record_args, db.clone()).await {

@@ -79,6 +79,17 @@ pub struct DeleteTimeRangeResult {
     pub snapshot_files: Vec<String>,
 }
 
+/// Result of [`DatabaseManager::delete_audio_in_time_range`].
+#[derive(Debug, Default)]
+pub struct AudioPurgeResult {
+    pub transcriptions_deleted: u64,
+    pub meeting_segments_deleted: u64,
+    pub chunks_deleted: u64,
+    /// File paths of deleted audio chunks — caller removes them from disk
+    /// after the transaction commits.
+    pub audio_files: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct NewMeetingTranscriptSegment {
     pub provider: String,
@@ -1339,6 +1350,93 @@ impl DatabaseManager {
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Delete all audio data captured inside a time range: transcriptions
+    /// (FTS rows go via trigger), live meeting transcript segments, and audio
+    /// chunks captured in the range that end up with no transcriptions —
+    /// including pending chunks that were persisted but never transcribed.
+    ///
+    /// Used by the incognito privacy purge: when an incognito browser window
+    /// is detected, audio from the surrounding ±5 minute window is removed.
+    /// Returns the file paths of deleted chunks; the caller removes them from
+    /// disk after the transaction commits.
+    pub async fn delete_audio_in_time_range(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<AudioPurgeResult, sqlx::Error> {
+        let mut tx = self.begin_immediate_with_retry().await?;
+
+        let start_str = start.to_rfc3339();
+        let end_str = end.to_rfc3339();
+
+        // 1. Transcriptions in range — audio_transcriptions_fts cleaned by trigger.
+        let transcriptions_deleted =
+            sqlx::query("DELETE FROM audio_transcriptions WHERE timestamp BETWEEN ?1 AND ?2")
+                .bind(&start_str)
+                .bind(&end_str)
+                .execute(&mut **tx.conn())
+                .await?
+                .rows_affected();
+
+        // 2. Live meeting transcript finals captured in range. captured_at is
+        // TEXT in mixed formats, so compare via julianday like other readers.
+        let meeting_segments_deleted = sqlx::query(
+            "DELETE FROM meeting_transcript_segments
+             WHERE julianday(captured_at) >= julianday(?1)
+               AND julianday(captured_at) <= julianday(?2)",
+        )
+        .bind(&start_str)
+        .bind(&end_str)
+        .execute(&mut **tx.conn())
+        .await?
+        .rows_affected();
+
+        // 3. Chunks captured in range that no longer have any transcription.
+        // Selecting by the chunk's own capture timestamp also catches pending
+        // chunks that were persisted to disk but never transcribed. Chunks
+        // still referenced by transcriptions outside the range survive.
+        let chunks: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT id, file_path FROM audio_chunks
+             WHERE timestamp BETWEEN ?1 AND ?2
+               AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions)",
+        )
+        .bind(&start_str)
+        .bind(&end_str)
+        .fetch_all(&mut **tx.conn())
+        .await?;
+
+        for (chunk_id, _) in &chunks {
+            // Diarization tables declare ON DELETE CASCADE, but delete the
+            // dependents explicitly so the purge doesn't hinge on the
+            // connection's foreign_keys pragma.
+            sqlx::query("DELETE FROM speaker_identity_evidence WHERE audio_chunk_id = ?1")
+                .bind(chunk_id)
+                .execute(&mut **tx.conn())
+                .await?;
+            sqlx::query("DELETE FROM diarization_segments WHERE audio_chunk_id = ?1")
+                .bind(chunk_id)
+                .execute(&mut **tx.conn())
+                .await?;
+            sqlx::query("DELETE FROM diarization_runs WHERE audio_chunk_id = ?1")
+                .bind(chunk_id)
+                .execute(&mut **tx.conn())
+                .await?;
+            sqlx::query("DELETE FROM audio_chunks WHERE id = ?1")
+                .bind(chunk_id)
+                .execute(&mut **tx.conn())
+                .await?;
+        }
+
+        tx.commit().await?;
+
+        Ok(AudioPurgeResult {
+            transcriptions_deleted,
+            meeting_segments_deleted,
+            chunks_deleted: chunks.len() as u64,
+            audio_files: chunks.into_iter().map(|(_, path)| path).collect(),
+        })
     }
 
     pub async fn count_audio_transcriptions(

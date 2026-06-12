@@ -40,6 +40,8 @@ mod windows;
 
 mod titles;
 
+#[cfg(target_os = "macos")]
+pub use macos::chromium_incognito_window_present;
 pub use titles::is_title_private;
 
 /// Trait for platform-specific incognito detection.

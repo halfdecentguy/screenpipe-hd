@@ -25,6 +25,7 @@ pub mod frame_linker_actor;
 pub mod hd_recorder;
 pub mod high_fps_controller;
 pub mod hot_frame_cache;
+pub mod incognito_monitor;
 pub mod logging;
 pub mod mcp_servers_api;
 pub mod meeting_detector;
@@ -65,6 +66,7 @@ pub use recording_config::RecordingConfig;
 
 pub use calendar_speaker_id::start_speaker_identification;
 pub use cloud_search::{CloudSearchClient, CloudSearchMetadata, CloudStatus};
+pub use incognito_monitor::start_incognito_monitor;
 pub use meeting_watcher::start_meeting_watcher;
 pub use power::{start_power_manager, start_power_manager_with_pref, PowerManagerHandle};
 pub use resource_monitor::{ResourceMonitor, RestartSignal};

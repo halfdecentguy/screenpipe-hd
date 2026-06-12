@@ -1880,6 +1880,12 @@ async fn do_capture(
     let tree_snapshot = match tree_walk_result {
         TreeWalkResult::Found(snap) => Some(snap),
         TreeWalkResult::Skipped(reason) => {
+            // A focused incognito window also suppresses audio transcription
+            // (±5 minutes around its presence) — feed the shared state that
+            // the audio pipeline and the incognito monitor's purge driver read.
+            if matches!(reason, screenpipe_a11y::tree::SkipReason::Incognito) {
+                screenpipe_config::incognito::report_incognito_window_present();
+            }
             debug!(
                 "skipping capture: window filtered ({}) on monitor {}",
                 reason, params.monitor_id

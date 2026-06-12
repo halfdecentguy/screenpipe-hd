@@ -236,6 +236,13 @@ impl RecordingConfig {
         // so the audio recording loop can read it without holding a config reference.
         screenpipe_config::set_record_while_locked(settings.record_while_locked);
 
+        // Same for incognito handling: the audio pipeline and the incognito
+        // monitor read this shared flag to suppress transcription (±5min)
+        // while an incognito browser window is present.
+        screenpipe_config::incognito::set_ignore_incognito_windows(
+            settings.ignore_incognito_windows,
+        );
+
         Self {
             audio_chunk_duration: settings.audio_chunk_duration.max(0) as u64,
             port: settings.port,

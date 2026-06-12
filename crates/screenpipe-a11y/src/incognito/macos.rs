@@ -191,6 +191,18 @@ end if"#,
     }
 }
 
+/// True if the given Chromium browser currently has at least one incognito
+/// window open, regardless of focus or minimized state. `None` when the app
+/// is not a known Chromium browser, is not running, or the AppleScript query
+/// failed. Used by the engine's incognito presence poller; uncached — callers
+/// decide their own poll cadence.
+pub fn chromium_incognito_window_present(app_name: &str) -> Option<bool> {
+    if !MacOSIncognitoDetector::is_chromium_browser(app_name) {
+        return None;
+    }
+    MacOSIncognitoDetector::query_incognito_titles(app_name).map(|titles| !titles.is_empty())
+}
+
 impl IncognitoDetector for MacOSIncognitoDetector {
     fn is_incognito(&self, app_name: &str, _process_id: i32, window_title: &str) -> bool {
         // Strategy 1: AppleScript query for Chromium browsers (not Arc).

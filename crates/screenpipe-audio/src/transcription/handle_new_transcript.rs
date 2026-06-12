@@ -71,6 +71,18 @@ pub async fn handle_new_transcript(
             metrics.record_transcription_completed();
         }
 
+        // Incognito privacy window: results for audio captured inside a
+        // suppression window must never be inserted. Catches STT results
+        // that were already in flight when the window opened, and deferred
+        // (batch/reconciliation) processing of chunks from an old window.
+        if screenpipe_config::incognito::is_capture_time_suppressed(transcription.timestamp) {
+            info!(
+                "dropping transcription from {} captured during incognito privacy window",
+                transcription.input.device
+            );
+            continue;
+        }
+
         debug!(
             "device {} received transcription ({} chars)",
             transcription.input.device,

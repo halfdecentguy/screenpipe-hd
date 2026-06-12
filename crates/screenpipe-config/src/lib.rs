@@ -21,6 +21,7 @@
 //! engine consumes.
 
 mod defaults;
+pub mod incognito;
 mod persistence;
 mod recording;
 pub mod screen_lock;
