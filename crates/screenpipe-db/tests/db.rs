@@ -2545,4 +2545,174 @@ mod tests {
             .unwrap();
         assert_eq!(count, 0, "Should count 0 for non-matching query");
     }
+
+    #[tokio::test]
+    async fn test_delete_audio_in_time_range() {
+        let db = setup_test_db().await;
+        let device = AudioDevice {
+            name: "test-mic".to_string(),
+            device_type: DeviceType::Input,
+        };
+
+        let t0 = Utc::now();
+        let inside = t0 + chrono::Duration::minutes(1);
+        let outside = t0 + chrono::Duration::minutes(30);
+
+        // Chunk fully inside the purge window, with a transcription.
+        let purged_chunk = db
+            .insert_audio_chunk("purged_inside.mp4", Some(inside))
+            .await
+            .unwrap();
+        db.insert_audio_transcription(
+            purged_chunk,
+            "secret incognito era speech",
+            0,
+            "test",
+            &device,
+            None,
+            None,
+            None,
+            Some(inside),
+        )
+        .await
+        .unwrap();
+
+        // Pending chunk inside the window — persisted but never transcribed.
+        let pending_chunk = db
+            .insert_audio_chunk("pending_inside.mp4", Some(inside))
+            .await
+            .unwrap();
+
+        // Chunk inside the window but with a second transcription outside it —
+        // must survive (still referenced after the purge).
+        let straddling_chunk = db
+            .insert_audio_chunk("straddling.mp4", Some(inside))
+            .await
+            .unwrap();
+        db.insert_audio_transcription(
+            straddling_chunk,
+            "early words spoken during the window",
+            0,
+            "test",
+            &device,
+            None,
+            None,
+            None,
+            Some(inside),
+        )
+        .await
+        .unwrap();
+        db.insert_audio_transcription(
+            straddling_chunk,
+            "later words spoken after the window",
+            1,
+            "test",
+            &device,
+            None,
+            None,
+            None,
+            Some(outside),
+        )
+        .await
+        .unwrap();
+
+        // Chunk entirely outside the window — untouched.
+        let outside_chunk = db
+            .insert_audio_chunk("outside.mp4", Some(outside))
+            .await
+            .unwrap();
+        db.insert_audio_transcription(
+            outside_chunk,
+            "perfectly normal conversation",
+            0,
+            "test",
+            &device,
+            None,
+            None,
+            None,
+            Some(outside),
+        )
+        .await
+        .unwrap();
+
+        // Live meeting transcript finals on both sides of the window.
+        let meeting_id = db.insert_meeting("zoom", "test", None, None).await.unwrap();
+        db.insert_meeting_transcript_segment(
+            meeting_id,
+            "deepgram",
+            None,
+            "item-inside",
+            "test-mic",
+            "input",
+            None,
+            "meeting words during the window",
+            inside,
+        )
+        .await
+        .unwrap();
+        db.insert_meeting_transcript_segment(
+            meeting_id,
+            "deepgram",
+            None,
+            "item-outside",
+            "test-mic",
+            "input",
+            None,
+            "meeting words after the window",
+            outside,
+        )
+        .await
+        .unwrap();
+
+        let result = db
+            .delete_audio_in_time_range(t0, t0 + chrono::Duration::minutes(10))
+            .await
+            .unwrap();
+
+        assert_eq!(result.transcriptions_deleted, 2);
+        assert_eq!(result.meeting_segments_deleted, 1);
+        assert_eq!(result.chunks_deleted, 2);
+        let mut files = result.audio_files.clone();
+        files.sort();
+        assert_eq!(files, vec!["pending_inside.mp4", "purged_inside.mp4"]);
+
+        assert!(!db.audio_chunk_exists(purged_chunk).await.unwrap());
+        assert!(!db.audio_chunk_exists(pending_chunk).await.unwrap());
+        assert!(db.audio_chunk_exists(straddling_chunk).await.unwrap());
+        assert!(db.audio_chunk_exists(outside_chunk).await.unwrap());
+
+        // The straddling chunk keeps only its outside-window transcription.
+        assert_eq!(
+            db.count_audio_transcriptions(straddling_chunk)
+                .await
+                .unwrap(),
+            1
+        );
+
+        // FTS must not resurrect purged text.
+        let hits = db
+            .search(
+                "incognito",
+                ContentType::Audio,
+                100,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 0, "purged transcription must be gone from FTS");
+    }
 }

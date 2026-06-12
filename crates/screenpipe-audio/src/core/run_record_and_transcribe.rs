@@ -180,6 +180,7 @@ pub async fn run_record_and_transcribe(
     let mut segment_count: u64 = 0;
 
     let mut was_paused_for_lock = false;
+    let mut was_paused_for_incognito = false;
 
     while is_running.load(Ordering::Relaxed)
         && !audio_stream.is_disconnected.load(Ordering::Relaxed)
@@ -237,7 +238,40 @@ pub async fn run_record_and_transcribe(
             ));
         }
 
-        while collected_audio.len() < max_samples && is_running.load(Ordering::Relaxed) {
+        // Drop audio while an incognito browser window is (or was within the
+        // last 5 minutes) present. Unlike the lock pause above, the partial
+        // segment buffer is cleared: audio collected just before detection
+        // falls inside the retroactive 5-minute privacy margin and must not
+        // reach transcription.
+        if screenpipe_config::incognito::audio_suppressed_for_incognito() {
+            if !was_paused_for_incognito {
+                info!(
+                    "incognito window present — pausing audio capture for {} \
+                     (resumes 5 minutes after the last incognito window closes)",
+                    device_name
+                );
+                was_paused_for_incognito = true;
+            }
+            collected_audio.clear();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            continue;
+        }
+        if was_paused_for_incognito {
+            info!(
+                "incognito privacy window over — resuming audio capture for {}",
+                device_name
+            );
+            was_paused_for_incognito = false;
+            segment_start_time = now_epoch_secs();
+        }
+
+        while collected_audio.len() < max_samples
+            && is_running.load(Ordering::Relaxed)
+            // Bail out of the segment as soon as suppression starts so the
+            // live meeting tap stops streaming immediately; the partial
+            // segment is dropped by the manager's capture-time gate.
+            && !screenpipe_config::incognito::audio_suppressed_for_incognito()
+        {
             match recv_audio_chunk(
                 &mut receiver,
                 &audio_stream,

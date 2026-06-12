@@ -300,6 +300,12 @@ impl ServerCore {
         resource_monitor.start_monitoring(Duration::from_secs(30), Some(Duration::from_secs(60)));
         start_sleep_monitor();
 
+        // Incognito presence monitor: keeps audio transcription suppressed
+        // while an incognito browser window is open (±5min) and purges
+        // transcripts from the suppression window.
+        let _incognito_monitor_handle =
+            screenpipe_engine::start_incognito_monitor(db.clone());
+
         // --- HTTP server ---
         let mut server = SCServer::new(
             db.clone(),

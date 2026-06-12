@@ -775,6 +775,20 @@ impl AudioManager {
                 metrics.record_chunk_received();
                 debug!("received audio from device: {:?}", audio.device.name);
 
+                // Incognito privacy window: drop segments captured while
+                // suppressed before anything touches disk or the DB. The
+                // record loop already pauses at the source; this catches
+                // segments that were in flight when the window opened (their
+                // capture time falls in the retroactive 5-minute margin).
+                if screenpipe_config::incognito::is_capture_time_suppressed(audio.capture_timestamp)
+                {
+                    debug!(
+                        "dropping audio segment from {} captured during incognito privacy window",
+                        audio.device.name
+                    );
+                    continue;
+                }
+
                 // Audio-based call detection: update meeting detector with speech activity.
                 // Output devices (SCK on macOS) produce much quieter audio than mic input,
                 // so we use a lower threshold. Empirical data from real SCK captures:
