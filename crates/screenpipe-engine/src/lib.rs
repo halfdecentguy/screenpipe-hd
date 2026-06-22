@@ -28,6 +28,7 @@ pub mod hot_frame_cache;
 pub mod incognito_monitor;
 pub mod logging;
 pub mod mcp_servers_api;
+pub mod media_detector;
 pub mod meeting_detector;
 pub mod meeting_export;
 pub mod meeting_persister;

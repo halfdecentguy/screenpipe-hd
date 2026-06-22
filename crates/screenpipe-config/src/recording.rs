@@ -311,6 +311,17 @@ pub struct RecordingSettings {
     #[serde(rename = "pauseOnDrmContent", default)]
     pub pause_on_drm_content: bool,
 
+    /// Pause **both** screen capture and audio transcription while watching a
+    /// movie, TV show, or live sports — driven by an allowlist (streaming +
+    /// local players + live-sports apps/URLs) plus a manual tray/hotkey
+    /// override. Forward-only: nothing already captured is deleted. Unlike
+    /// `pauseOnDrmContent` (screen-only, DRM apps only) this also stops audio
+    /// transcription and covers local players and sports sites. Default ON —
+    /// this is the productized fix for capturing+transcribing a full-screen
+    /// movie for hours (sustained CPU/heat/battery).
+    #[serde(rename = "pauseOnMediaPlayback", default = "default_true")]
+    pub pause_on_media_playback: bool,
+
     /// Skip persisting clipboard rows/content in the UI recorder. Defaults to
     /// `true` (clipboard DB capture OFF) — passwords / API keys / private keys
     /// frequently pass through the clipboard. Clipboard operations can still
@@ -575,6 +586,7 @@ impl Default for RecordingSettings {
             ignored_urls: vec![],
             ignore_incognito_windows: true,
             pause_on_drm_content: false,
+            pause_on_media_playback: true,
             disable_clipboard_capture: true,
             disable_keyboard_capture: true,
             record_while_locked: false,
@@ -672,6 +684,9 @@ mod tests {
         assert_eq!(settings.video_quality, "balanced");
         assert!(settings.use_system_default_audio);
         assert!(settings.ignore_incognito_windows);
+        // Media-pause defaults ON (even when absent from a legacy store.bin)
+        // so the personal build pauses while watching without any opt-in.
+        assert!(settings.pause_on_media_playback);
     }
 
     #[test]

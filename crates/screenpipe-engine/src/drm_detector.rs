@@ -216,7 +216,7 @@ const BROWSER_APPS: &[&str] = &[
 ];
 
 #[cfg(target_os = "macos")]
-fn is_browser(app_name: &str) -> bool {
+pub(crate) fn is_browser(app_name: &str) -> bool {
     let lower = app_name.to_lowercase();
     BROWSER_APPS.iter().any(|&b| lower.contains(b))
 }
@@ -535,8 +535,11 @@ pub fn poll_drm_clear() -> bool {
 
 /// Get the browser URL using only Accessibility APIs (no SCK).
 /// Tries AXDocument on the focused window, then AppleScript for Arc.
+///
+/// Generic (returns the real URL, no DRM filtering) — also reused by
+/// `media_detector` for media-allowlist matching.
 #[cfg(target_os = "macos")]
-fn get_browser_url_ax(app: &cidre::ax::UiElement, app_name: &str) -> Option<String> {
+pub(crate) fn get_browser_url_ax(app: &cidre::ax::UiElement, app_name: &str) -> Option<String> {
     use cidre::{ax, cf};
 
     // Try to get the focused window

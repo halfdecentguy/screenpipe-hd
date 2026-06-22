@@ -22,6 +22,7 @@
 
 mod defaults;
 pub mod incognito;
+pub mod media;
 mod persistence;
 mod recording;
 pub mod screen_lock;

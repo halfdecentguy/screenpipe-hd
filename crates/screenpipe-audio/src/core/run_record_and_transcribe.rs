@@ -181,6 +181,7 @@ pub async fn run_record_and_transcribe(
 
     let mut was_paused_for_lock = false;
     let mut was_paused_for_incognito = false;
+    let mut was_paused_for_media = false;
 
     while is_running.load(Ordering::Relaxed)
         && !audio_stream.is_disconnected.load(Ordering::Relaxed)
@@ -265,12 +266,43 @@ pub async fn run_record_and_transcribe(
             segment_start_time = now_epoch_secs();
         }
 
+        // Pause audio while media playback is suppressing capture (a movie /
+        // TV / live-sports app or URL on the allowlist, or a manual media
+        // pause from the tray/hotkey). Forward-only — nothing already
+        // transcribed is deleted; we just stop feeding new audio to Whisper,
+        // which is the whole point (dialogue/commentary is speech that
+        // `filterMusic` would otherwise let through). Same shape as the
+        // incognito gate above; the partial buffer is cleared so a segment
+        // doesn't straddle the pause boundary.
+        if screenpipe_config::media::audio_suppressed_for_media() {
+            if !was_paused_for_media {
+                info!(
+                    "media playback — pausing audio capture for {} \
+                     (resumes when you switch away or the manual pause ends)",
+                    device_name
+                );
+                was_paused_for_media = true;
+            }
+            collected_audio.clear();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            continue;
+        }
+        if was_paused_for_media {
+            info!(
+                "media playback over — resuming audio capture for {}",
+                device_name
+            );
+            was_paused_for_media = false;
+            segment_start_time = now_epoch_secs();
+        }
+
         while collected_audio.len() < max_samples
             && is_running.load(Ordering::Relaxed)
             // Bail out of the segment as soon as suppression starts so the
             // live meeting tap stops streaming immediately; the partial
             // segment is dropped by the manager's capture-time gate.
             && !screenpipe_config::incognito::audio_suppressed_for_incognito()
+            && !screenpipe_config::media::audio_suppressed_for_media()
         {
             match recv_audio_chunk(
                 &mut receiver,

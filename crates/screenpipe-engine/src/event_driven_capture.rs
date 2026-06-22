@@ -221,7 +221,7 @@ fn should_run_visual_check(
     trigger: &Option<CaptureTrigger>,
     visual_check_enabled: bool,
     can_capture: bool,
-    drm_paused: bool,
+    content_paused: bool,
     schedule_paused: bool,
     elapsed_since_visual_check: Duration,
     visual_check_interval: Duration,
@@ -230,7 +230,7 @@ fn should_run_visual_check(
     trigger.is_none()
         && visual_check_enabled
         && can_capture
-        && !drm_paused
+        && !content_paused
         && !schedule_paused
         && elapsed_since_visual_check >= visual_check_interval
         && keyboard_idle_ms >= quiet_activity_window_ms(visual_check_interval)
@@ -680,6 +680,7 @@ pub async fn event_driven_capture_loop(
     // Skip if outside work-hours schedule.
     if !crate::sleep_monitor::screen_is_locked()
         && !crate::drm_detector::pre_capture_drm_check(pause_on_drm_content, None)
+        && !crate::media_detector::pre_capture_media_check(None)
         && !crate::schedule_monitor::schedule_paused()
     {
         // Small delay to let the monitor settle after startup
@@ -895,13 +896,14 @@ pub async fn event_driven_capture_loop(
                 .as_ref()
                 .map(|rx| rx.borrow().capture_paused)
                 .unwrap_or(false)
-            || crate::drm_detector::drm_content_paused()
+            // DRM or media playback — both release the SCK capture stream.
+            || crate::media_detector::content_capture_paused()
             || crate::schedule_monitor::schedule_paused();
 
         if in_pause_state {
             if should_release_on_pause_entry(was_in_pause_state, in_pause_state) {
                 info!(
-                    "monitor {}: entering pause state (locked={}, power_paused={}, drm={}, schedule={}); releasing capture stream",
+                    "monitor {}: entering pause state (locked={}, power_paused={}, drm={}, media={}, schedule={}); releasing capture stream",
                     monitor_id,
                     crate::sleep_monitor::screen_is_locked(),
                     power_profile_rx
@@ -909,6 +911,7 @@ pub async fn event_driven_capture_loop(
                         .map(|rx| rx.borrow().capture_paused)
                         .unwrap_or(false),
                     crate::drm_detector::drm_content_paused(),
+                    screenpipe_config::media::media_capture_suppressed(),
                     crate::schedule_monitor::schedule_paused(),
                 );
                 monitor.release_capture_stream();
@@ -1168,7 +1171,8 @@ pub async fn event_driven_capture_loop(
             &trigger,
             visual_check_enabled,
             state.can_capture(),
-            crate::drm_detector::drm_content_paused(),
+            // DRM or media playback — skip the SCK-touching visual diff.
+            crate::media_detector::content_capture_paused(),
             crate::schedule_monitor::schedule_paused(),
             last_visual_check.elapsed(),
             visual_check_interval,
@@ -1226,7 +1230,7 @@ pub async fn event_driven_capture_loop(
                     );
                 }
 
-                // Pre-capture DRM gate: check BEFORE any SCK call.
+                // Pre-capture DRM / media gate: check BEFORE any SCK call.
                 // Uses AX APIs only — prevents even a single leaked frame.
                 {
                     let trigger_app = match &trigger {
@@ -1246,6 +1250,24 @@ pub async fn event_driven_capture_loop(
                                 linker_tx.as_ref(),
                                 std::mem::take(&mut correlation_ids),
                                 crate::frame_linker::DropReason::Drm,
+                            );
+                        }
+                        tokio::time::sleep(poll_interval).await;
+                        continue;
+                    }
+                    // Media-playback gate (movies / TV / live sports + manual
+                    // override). Reported as a pause-state drop, same as the
+                    // lock / power / schedule pauses.
+                    if crate::media_detector::pre_capture_media_check(trigger_app) {
+                        debug!(
+                            "pre-capture media check blocked capture on monitor {}",
+                            monitor_id
+                        );
+                        if !correlation_ids.is_empty() {
+                            report_triggers_dropped(
+                                linker_tx.as_ref(),
+                                std::mem::take(&mut correlation_ids),
+                                crate::frame_linker::DropReason::Paused,
                             );
                         }
                         tokio::time::sleep(poll_interval).await;
@@ -2032,6 +2054,22 @@ async fn do_capture(
     // and the monitor watcher releases all SCK handles.
     if crate::drm_detector::check_and_update_drm_state(
         params.pause_on_drm_content,
+        app_name_owned.as_deref(),
+        browser_url_owned.as_deref(),
+    ) {
+        return Ok(CaptureOutput {
+            result: None,
+            image,
+            elements_deduped: false,
+        });
+    }
+
+    // Media-playback detection (movies / TV / live sports). Sets the shared
+    // media flag from the resolved app/URL so ALL monitors pause and the
+    // monitor watcher releases SCK handles — same mechanism as DRM, but it
+    // also drives the audio pipeline. Reads its own ENABLED global (no config
+    // param threaded through the vision pipeline).
+    if crate::media_detector::check_and_update_media_state(
         app_name_owned.as_deref(),
         browser_url_owned.as_deref(),
     ) {

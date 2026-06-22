@@ -25,6 +25,7 @@ import {
   RefreshCw,
   AppWindowMac,
   Tv,
+  Film,
   Lock,
   Copy,
   ClipboardX,
@@ -560,6 +561,10 @@ export function PrivacySection() {
     handleSettingsChange({ pauseOnDrmContent: checked }, true);
   };
 
+  const handleMediaPauseToggle = (checked: boolean) => {
+    handleSettingsChange({ pauseOnMediaPlayback: checked }, true);
+  };
+
   const handleClipboardCaptureToggle = (checked: boolean) => {
     // UI is "Capture clipboard" on/off. Settings store inverts to match
     // the CLI flag name (--disable-clipboard-capture).
@@ -969,6 +974,31 @@ export function PrivacySection() {
               id="pauseOnDrmContent"
               checked={Boolean(settings.pauseOnDrmContent ?? false)}
               onCheckedChange={handleDrmPauseToggle}
+            />
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Pause while watching video (movies / TV / live sports) */}
+      <Card>
+        <CardContent className="px-3 py-2.5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-2.5">
+              <Film className="h-4 w-4 text-muted-foreground shrink-0" />
+              <div>
+                <h3 className="text-sm font-medium text-foreground flex items-center gap-1.5">
+                  Pause while watching video
+                  <HelpTooltip text="pauses BOTH screen capture and audio transcription while you watch a movie, TV show, or live sports — detected by an allowlist of streaming services, local players (VLC, IINA, QuickTime, mpv, Plex), and live-sports apps/sites. capture resumes automatically when you switch away. YouTube and Twitch are NOT auto-paused (use the tray 'Pause while watching' override for the occasional movie there). forward-only: nothing already captured is deleted. unlike 'Pause for DRM' this also stops audio and covers local players and sports." />
+                </h3>
+                <p className="text-xs text-muted-foreground">
+                  Save CPU/heat/battery — stop capturing movies, TV & sports.
+                </p>
+              </div>
+            </div>
+            <Switch
+              id="pauseOnMediaPlayback"
+              checked={Boolean(settings.pauseOnMediaPlayback ?? true)}
+              onCheckedChange={handleMediaPauseToggle}
             />
           </div>
         </CardContent>

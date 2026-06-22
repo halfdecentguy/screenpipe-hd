@@ -243,6 +243,13 @@ impl RecordingConfig {
             settings.ignore_incognito_windows,
         );
 
+        // Same for media-playback pause: the audio pipeline and the engine's
+        // media_detector read this shared flag to suppress both screen capture
+        // and audio transcription while the user is watching a movie / TV /
+        // live sports. Synced here (not threaded through the vision config)
+        // because media has its own ENABLED global, unlike DRM.
+        screenpipe_config::media::set_pause_on_media_playback(settings.pause_on_media_playback);
+
         Self {
             audio_chunk_duration: settings.audio_chunk_duration.max(0) as u64,
             port: settings.port,

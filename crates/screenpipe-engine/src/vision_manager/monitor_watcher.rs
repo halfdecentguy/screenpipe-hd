@@ -46,8 +46,9 @@ pub async fn start_monitor_watcher(
         let mut known_monitors: HashMap<u32, String> = HashMap::new();
         // Track permission state to avoid log spam
         let mut permission_denied_logged = false;
-        // Track whether we stopped monitors due to DRM
-        let mut drm_stopped = false;
+        // Track whether we stopped monitors due to a content pause (DRM or
+        // media playback / manual media override).
+        let mut content_stopped = false;
         // Track whether we stopped recording due to work-hours schedule
         let mut schedule_stopped = false;
         // Suppresses the topology-changed event for the next reconcile pass.
@@ -80,50 +81,66 @@ pub async fn start_monitor_watcher(
         }
 
         loop {
-            // ── DRM pause handling ──────────────────────────────────────────
-            // When DRM content is focused, we must:
+            // ── Content pause handling (DRM + media playback) ───────────────
+            // When DRM content is focused OR the user is watching a movie / TV
+            // / live sports (allowlist or manual media override), we must:
             // 1. Stop all monitors (release SCK capture handles)
             // 2. NOT call list_monitors_detailed() (avoids touching SCK APIs)
             // 3. Only poll the focused app via Accessibility APIs
-            // This ensures macOS DRM sees no active ScreenCaptureKit usage.
-            if drm_detector::drm_content_paused() {
-                if !drm_stopped {
+            // This keeps macOS DRM from blacking out content (no active SCK)
+            // and removes the capture load that makes watching a full-screen
+            // video burn CPU/battery.
+            if drm_detector::drm_content_paused()
+                || screenpipe_config::media::media_capture_suppressed()
+            {
+                if !content_stopped {
                     info!(
-                        "DRM content focused — stopping all vision monitors to release SCK handles"
+                        "content pause (drm={}, media={}) — stopping all vision monitors to release SCK handles",
+                        drm_detector::drm_content_paused(),
+                        screenpipe_config::media::media_capture_suppressed(),
                     );
                     if let Err(e) = vision_manager.stop().await {
-                        warn!("failed to stop vision manager for DRM pause: {:?}", e);
+                        warn!("failed to stop vision manager for content pause: {:?}", e);
                     }
                     if let Some(ref am) = audio_manager {
                         if let Err(e) = am.stop_output_devices().await {
-                            warn!("failed to stop SCK audio for DRM pause: {:?}", e);
+                            warn!("failed to stop SCK audio for content pause: {:?}", e);
                         }
                     }
-                    drm_stopped = true;
+                    content_stopped = true;
                 }
-                // Poll focused app (Accessibility API only, no SCK) to detect
-                // when user switches away from DRM content.
+                // Poll focused app (Accessibility/CG only, no SCK) to detect
+                // when the user switches away. Evaluate BOTH clears (no
+                // short-circuit) so each maintains its own flag; a manual media
+                // pause keeps the media side active regardless of focus.
                 let still_drm = tokio::task::spawn_blocking(drm_detector::poll_drm_clear)
                     .await
                     .unwrap_or(true);
-                if still_drm {
+                let still_media =
+                    tokio::task::spawn_blocking(crate::media_detector::poll_media_clear)
+                        .await
+                        .unwrap_or(true);
+                if still_drm || still_media {
                     tokio::time::sleep(Duration::from_secs(2)).await;
                     continue;
                 }
-                // DRM cleared — fall through to restart below
+                // Both cleared — fall through to restart below.
             }
 
-            if drm_stopped {
-                info!("DRM content no longer focused — restarting vision monitors");
+            if content_stopped {
+                info!("content pause over — restarting vision monitors");
                 if let Err(e) = vision_manager.start().await {
-                    warn!("failed to restart vision manager after DRM pause: {:?}", e);
+                    warn!(
+                        "failed to restart vision manager after content pause: {:?}",
+                        e
+                    );
                 }
                 if let Some(ref am) = audio_manager {
                     if let Err(e) = am.start_output_devices().await {
-                        warn!("failed to restart SCK audio after DRM clear: {:?}", e);
+                        warn!("failed to restart SCK audio after content pause: {:?}", e);
                     }
                 }
-                drm_stopped = false;
+                content_stopped = false;
                 suppress_next_topology_event = true;
                 // Re-populate known_monitors after restart
                 if let Ok(monitors) = list_monitors_detailed().await {

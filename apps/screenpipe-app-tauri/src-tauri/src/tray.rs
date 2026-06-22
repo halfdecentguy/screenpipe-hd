@@ -793,6 +793,31 @@ fn create_dynamic_menu(
                 .item(&MenuItemBuilder::with_id("pause_60", "1 hour").build(app)?)
                 .build()?;
             menu_builder = menu_builder.item(&pause_submenu);
+
+            // Media pause override — stop both pipelines while watching a
+            // movie / TV / live sports the allowlist misses (e.g. YouTube,
+            // Twitch). Sets the shared media flag; the engine auto-resumes when
+            // the timer ends or you switch away. Distinct from "Pause for…"
+            // (longer presets, an "until I turn it off" mode, and watch-aware).
+            let media_submenu = if screenpipe_config::media::manual_active() {
+                SubmenuBuilder::new(app, "Watching — capture paused")
+                    .item(
+                        &MenuItemBuilder::with_id("media_pause_resume", "Resume capture now")
+                            .build(app)?,
+                    )
+                    .build()?
+            } else {
+                SubmenuBuilder::new(app, "Pause while watching")
+                    .item(&MenuItemBuilder::with_id("media_pause_3600", "1 hour").build(app)?)
+                    .item(&MenuItemBuilder::with_id("media_pause_7200", "2 hours").build(app)?)
+                    .item(&MenuItemBuilder::with_id("media_pause_14400", "4 hours").build(app)?)
+                    .item(
+                        &MenuItemBuilder::with_id("media_pause_until_off", "Until I turn it off")
+                            .build(app)?,
+                    )
+                    .build()?
+            };
+            menu_builder = menu_builder.item(&media_submenu);
         }
 
         // HD recording: timer submenu when idle, "Stop" item when active.
@@ -1011,6 +1036,56 @@ fn handle_menu_event(app_handle: &AppHandle, event: tauri::menu::MenuEvent) {
             let app2 = app_handle.clone();
             let _ = app_handle.run_on_main_thread(move || {
                 if let Err(e) = force_tray_rebuild(&app2) {
+                    error!("tray rebuild failed: {}", e);
+                }
+            });
+        }
+        id if id.starts_with("media_pause_") => {
+            // Manual media-pause override (movies / TV / live sports). Just
+            // sets the shared flag; the in-process engine's capture loops and
+            // audio loop react within a couple seconds and auto-resume when the
+            // timer ends or you switch away. No recording-toggle change.
+            let suffix = id.strip_prefix("media_pause_").unwrap_or("");
+            let (title, body): (&str, String) = match suffix {
+                "resume" => {
+                    screenpipe_config::media::clear_manual_pause();
+                    (
+                        "Capture resumed",
+                        "screenpipe is capturing again.".to_string(),
+                    )
+                }
+                "until_off" => {
+                    screenpipe_config::media::start_manual_pause(None);
+                    (
+                        "Paused while watching",
+                        "Capture is paused until you turn it back on.".to_string(),
+                    )
+                }
+                secs => {
+                    let secs: u64 = secs.parse().unwrap_or(3600);
+                    screenpipe_config::media::start_manual_pause(Some(
+                        std::time::Duration::from_secs(secs),
+                    ));
+                    let pretty = if secs % 3600 == 0 {
+                        match secs / 3600 {
+                            1 => "1 hour".to_string(),
+                            h => format!("{} hours", h),
+                        }
+                    } else {
+                        format!("{} minutes", secs / 60)
+                    };
+                    (
+                        "Paused while watching",
+                        format!("Capture auto-resumes in {} (or when you switch away).", pretty),
+                    )
+                }
+            };
+            send_notify(title, body);
+            // Repaint so the submenu flips between "Pause while watching" and
+            // "Watching — capture paused".
+            let app_for_rebuild = app_handle.clone();
+            let _ = app_handle.run_on_main_thread(move || {
+                if let Err(e) = force_tray_rebuild(&app_for_rebuild) {
                     error!("tray rebuild failed: {}", e);
                 }
             });
