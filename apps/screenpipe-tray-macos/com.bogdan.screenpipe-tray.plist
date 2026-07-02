@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template — __BINARY__ is substituted by `make install-agent`. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.bogdan.screenpipe-tray</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__BINARY__</string>
+		<string>--engine-bin</string>
+		<string>__ENGINE_BIN__</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+</dict>
+</plist>
