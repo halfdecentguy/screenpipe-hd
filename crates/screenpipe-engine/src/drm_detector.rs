@@ -515,7 +515,9 @@ pub fn poll_drm_clear() -> bool {
                 return true;
             }
 
-            info!(
+            // Demoted to debug: fires from the ~2s clear-poll and is redundant
+            // with set_drm_paused's own "resuming screen capture" transition log.
+            debug!(
                 "focused app '{}' is not DRM and no DRM windows visible — clearing pause",
                 app_name
             );
@@ -622,14 +624,26 @@ pub fn poll_drm_clear() -> bool {
     false
 }
 
+/// Shared test lock for every test that mutates the process-global capture
+/// flags. Both `drm_detector` and `media_detector` touch overlapping statics
+/// (`DRM_CONTENT_PAUSED` and the `screenpipe_config::media` flags read by
+/// `content_capture_paused`), so they must serialize on the **same** mutex —
+/// two separate per-module locks would let parallel `cargo test` threads race.
+#[cfg(test)]
+pub(crate) fn test_flag_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::Mutex;
+    static FLAG_LOCK: Mutex<()> = Mutex::new(());
+    FLAG_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    /// Tests that touch the global DRM_CONTENT_PAUSED flag must hold this
-    /// mutex to avoid racing with each other (cargo test runs in parallel).
-    static DRM_FLAG_LOCK: Mutex<()> = Mutex::new(());
+    /// Alias to the crate-shared flag lock (see [`super::test_flag_lock`]).
+    fn drm_flag_lock() -> std::sync::MutexGuard<'static, ()> {
+        super::test_flag_lock()
+    }
 
     #[test]
     fn test_is_drm_app_positive() {
@@ -723,7 +737,7 @@ mod tests {
 
     #[test]
     fn test_global_flag() {
-        let _lock = DRM_FLAG_LOCK.lock().unwrap();
+        let _lock = drm_flag_lock();
         DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
         assert!(!drm_content_paused());
         set_drm_paused(true);
@@ -734,7 +748,7 @@ mod tests {
 
     #[test]
     fn test_check_and_update_disabled() {
-        let _lock = DRM_FLAG_LOCK.lock().unwrap();
+        let _lock = drm_flag_lock();
         DRM_CONTENT_PAUSED.store(true, Ordering::SeqCst);
         let result = check_and_update_drm_state(false, Some("Netflix"), None);
         assert!(!result);
@@ -743,7 +757,7 @@ mod tests {
 
     #[test]
     fn test_check_and_update_enabled() {
-        let _lock = DRM_FLAG_LOCK.lock().unwrap();
+        let _lock = drm_flag_lock();
         DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
         let result = check_and_update_drm_state(true, Some("Netflix"), None);
         assert!(result);
@@ -762,7 +776,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn test_pre_capture_drm_check_disabled() {
-        let _lock = DRM_FLAG_LOCK.lock().unwrap();
+        let _lock = drm_flag_lock();
         DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
         let result = pre_capture_drm_check(false, Some("Netflix"));
         assert!(!result, "should be no-op when setting is off");
@@ -772,7 +786,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn test_pre_capture_drm_check_native_app() {
-        let _lock = DRM_FLAG_LOCK.lock().unwrap();
+        let _lock = drm_flag_lock();
         DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
         let result = pre_capture_drm_check(true, Some("Netflix"));
         assert!(result, "should detect native DRM app");
@@ -784,7 +798,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn test_pre_capture_drm_check_non_drm_app() {
-        let _lock = DRM_FLAG_LOCK.lock().unwrap();
+        let _lock = drm_flag_lock();
         DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
         let result = pre_capture_drm_check(true, Some("Finder"));
         assert!(!result, "should not flag Finder as DRM");
@@ -794,7 +808,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn test_pre_capture_drm_check_already_paused() {
-        let _lock = DRM_FLAG_LOCK.lock().unwrap();
+        let _lock = drm_flag_lock();
         DRM_CONTENT_PAUSED.store(true, Ordering::SeqCst);
         let result = pre_capture_drm_check(true, Some("Finder"));
         assert!(result, "should stay paused when already paused");
@@ -965,7 +979,7 @@ mod tests {
 
     #[test]
     fn test_check_and_update_drm_state_sets_flag_on_drm_app() {
-        let _lock = DRM_FLAG_LOCK.lock().unwrap();
+        let _lock = drm_flag_lock();
         DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
         let result = check_and_update_drm_state(true, Some("Netflix"), None);
         assert!(result, "should return true for DRM app");
@@ -975,7 +989,7 @@ mod tests {
 
     #[test]
     fn test_check_and_update_drm_state_sets_flag_on_drm_url() {
-        let _lock = DRM_FLAG_LOCK.lock().unwrap();
+        let _lock = drm_flag_lock();
         DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
         let result =
             check_and_update_drm_state(true, Some("Chrome"), Some("https://netflix.com/watch"));
@@ -986,7 +1000,7 @@ mod tests {
 
     #[test]
     fn test_check_and_update_drm_state_clears_flag_on_non_drm() {
-        let _lock = DRM_FLAG_LOCK.lock().unwrap();
+        let _lock = drm_flag_lock();
         DRM_CONTENT_PAUSED.store(true, Ordering::SeqCst);
         let result = check_and_update_drm_state(true, Some("Finder"), Some("https://google.com"));
         assert!(!result, "should return false for non-DRM content");
@@ -996,7 +1010,7 @@ mod tests {
 
     #[test]
     fn test_check_and_update_drm_state_noop_when_disabled() {
-        let _lock = DRM_FLAG_LOCK.lock().unwrap();
+        let _lock = drm_flag_lock();
         DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
         let result = check_and_update_drm_state(false, Some("Netflix"), None);
         assert!(!result, "should return false when feature is disabled");
@@ -1008,7 +1022,7 @@ mod tests {
 
     #[test]
     fn test_check_and_update_drm_state_clears_flag_when_disabled() {
-        let _lock = DRM_FLAG_LOCK.lock().unwrap();
+        let _lock = drm_flag_lock();
         // If the flag was somehow set and the feature is disabled, it should clear
         DRM_CONTENT_PAUSED.store(true, Ordering::SeqCst);
         let result = check_and_update_drm_state(false, Some("Netflix"), None);
@@ -1021,7 +1035,7 @@ mod tests {
 
     #[test]
     fn test_check_and_update_drm_state_none_app_preserves_current() {
-        let _lock = DRM_FLAG_LOCK.lock().unwrap();
+        let _lock = drm_flag_lock();
         // When app_name is None (empty string), check_and_update_drm_state
         // preserves the current flag rather than clearing it (unknown = keep state).
         DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);

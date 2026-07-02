@@ -14,14 +14,19 @@
 //! ±margin. We simply stop capturing while media is playing; data already
 //! captured is never deleted (this is a power feature, not a privacy one).
 //!
-//! Three inputs combine into one suppression decision:
+//! Three inputs combine into one suppression decision
+//! (`(ENABLED && DETECTED) || manual_active()`):
 //!  - `ENABLED` — mirrors the `pauseOnMediaPlayback` recording setting,
 //!    synced from the engine's config conversion (same spot that syncs
-//!    `record_while_locked` / `ignore_incognito_windows`).
-//!  - `DETECTED` — set by the engine's `media_detector` when a media app /
-//!    URL is focused or visible on screen (allowlist hit).
+//!    `record_while_locked` / `ignore_incognito_windows`). Gates only the
+//!    **auto-detect** path.
+//!  - `DETECTED` — set by the engine's `media_detector` when the focused app
+//!    / URL is an allowlist hit.
 //!  - `MANUAL_UNTIL_MS` — a manual-override deadline set from the tray /
 //!    hotkey, for content the allowlist misses (e.g. a movie on YouTube).
+//!    A manual pause is **explicit user intent** and works independently of
+//!    `ENABLED` — hitting "pause while watching" in the tray must suppress
+//!    capture even when auto-detect is switched off.
 //!
 //! Detection lives in `screenpipe-engine`; the audio pipeline
 //! (`screenpipe-audio`) only reads the suppression state from here — the flag
@@ -108,13 +113,16 @@ fn manual_active_at(now: i64) -> bool {
 
 /// Whether capture (screen + audio) should be suppressed right now because of
 /// media playback. The single predicate read by the vision gates and the
-/// monitor watcher: enabled AND (allowlist hit OR manual override active).
+/// monitor watcher: an auto-detect hit (`ENABLED && DETECTED`) **or** an
+/// active manual override. Manual is intentionally independent of `ENABLED` —
+/// it is explicit user intent from the tray/hotkey and must work even with
+/// auto-detect switched off.
 pub fn media_capture_suppressed() -> bool {
     suppressed_at(now_ms())
 }
 
 fn suppressed_at(now: i64) -> bool {
-    enabled() && (media_detected() || manual_active_at(now))
+    (enabled() && media_detected()) || manual_active_at(now)
 }
 
 /// Alias read by the audio record loop — same condition as
@@ -142,14 +150,27 @@ mod tests {
     const MIN: i64 = 60 * 1000;
 
     #[test]
-    fn disabled_is_inert() {
+    fn detection_is_inert_while_disabled() {
         let _l = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset();
-        // Even with detection and a manual override, disabled means no suppression.
+        // Auto-detect is gated by ENABLED: a detection hit alone does nothing.
         set_media_detected(true);
-        start_manual_pause_at(T0, None);
         assert!(!suppressed_at(T0));
         assert!(!audio_suppressed_for_media());
+    }
+
+    #[test]
+    fn manual_pause_works_while_disabled() {
+        let _l = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        // Manual override is explicit user intent — it suppresses even when the
+        // auto-detect setting is off (ENABLED == false).
+        assert!(!enabled());
+        start_manual_pause_at(T0, None);
+        assert!(suppressed_at(T0));
+        assert!(audio_suppressed_for_media());
+        clear_manual_pause();
+        assert!(!suppressed_at(T0));
     }
 
     #[test]
@@ -190,15 +211,39 @@ mod tests {
     }
 
     #[test]
-    fn disabling_clears_manual_suppression() {
+    fn toggling_enabled_does_not_arm_or_disarm_manual() {
         let _l = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset();
-        set_pause_on_media_playback(true);
+        // Manual is orthogonal to ENABLED: flipping the auto-detect setting must
+        // neither start nor stop an active manual override.
         start_manual_pause_at(T0, None);
-        assert!(suppressed_at(T0));
+        assert!(manual_active_at(T0));
+        set_pause_on_media_playback(true);
+        assert!(manual_active_at(T0), "enabling must not disarm manual");
         set_pause_on_media_playback(false);
-        assert!(!suppressed_at(T0));
-        // Cleanup so other tests start from a known state.
+        assert!(manual_active_at(T0), "disabling must not disarm manual");
+        // Still suppressed after both toggles — only clear_manual_pause stops it.
+        assert!(suppressed_at(T0));
+        clear_manual_pause();
+        assert!(!manual_active_at(T0));
+
+        // A never-armed manual stays disarmed across toggles.
+        assert!(!manual_active_at(T0));
+        set_pause_on_media_playback(true);
+        set_pause_on_media_playback(false);
+        assert!(!manual_active_at(T0), "toggling must not arm manual");
+    }
+
+    #[test]
+    fn expired_deadline_auto_clears() {
+        let _l = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        start_manual_pause_at(T0, Some(Duration::from_millis(MIN as u64)));
+        assert!(manual_active_at(T0));
+        // Once the wall clock passes the deadline, manual is inactive by clock
+        // alone — no explicit clear needed.
+        assert!(!manual_active_at(T0 + MIN + 1));
+        assert!(!suppressed_at(T0 + MIN + 1));
         clear_manual_pause();
     }
 }

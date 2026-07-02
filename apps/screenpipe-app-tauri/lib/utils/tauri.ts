@@ -2616,6 +2616,17 @@ ignoreIncognitoWindows: boolean;
  */
 pauseOnDrmContent?: boolean;
 /**
+ * Pause **both** screen capture and audio transcription while watching a
+ * movie, TV show, or live sports — driven by an allowlist (streaming +
+ * local players + live-sports apps/URLs) plus a manual tray/hotkey
+ * override. Forward-only: nothing already captured is deleted. Unlike
+ * `pauseOnDrmContent` (screen-only, DRM apps only) this also stops audio
+ * transcription and covers local players and sports sites. Default ON —
+ * this is the productized fix for capturing+transcribing a full-screen
+ * movie for hours (sustained CPU/heat/battery).
+ */
+pauseOnMediaPlayback?: boolean;
+/**
  * Skip persisting clipboard rows/content in the UI recorder. Defaults to
  * `true` (clipboard DB capture OFF) — passwords / API keys / private keys
  * frequently pass through the clipboard. Clipboard operations can still

@@ -14,25 +14,42 @@
 //!
 //! Detection is an **allowlist** (precise, low false-positive) of streaming
 //! services, local players, and live-sports apps/URLs, plus a manual override
-//! (tray/hotkey) for the long tail. It mirrors [`crate::drm_detector`] — same
-//! Accessibility-only foreground query and `CGWindowList` on-screen scan, no
-//! ScreenCaptureKit calls — but writes the shared [`screenpipe_config::media`]
-//! flag instead of a local one, and matches a broader media allowlist.
+//! (tray/hotkey) for the long tail.
+//!
+//! **Focused-app only, by design.** Detection considers *only* the frontmost
+//! app and its focused window/URL — never background or on-screen-but-unfocused
+//! windows. A background window titled "ESPN …" tells us nothing about whether
+//! video is actually playing, and latching a pause on it would silently stop
+//! capture for the rest of the day (the worst failure mode for a
+//! context-capture tool). Picture-in-picture / background watching is covered
+//! by the manual tray override instead. (This is the key departure from
+//! [`crate::drm_detector`], whose on-screen scan is load-bearing: macOS DRM
+//! blacks out protected content whenever ScreenCaptureKit is active on *any*
+//! display, so DRM must stay paused while any DRM window is visible.)
+//!
+//! **Single probe, fail-open.** One function — [`probe_media_present`] — is the
+//! sole source of truth for "is media in the foreground right now". Both the
+//! pre-capture gate and the resume poll call it, so detection and clearing can
+//! never disagree. It reads the frontmost app name via NSWorkspace (needs no
+//! TCC permission); browser URL/title enrichment via Accessibility/AppleScript
+//! is **best-effort** — any error there means "no URL available", never "keep
+//! the pause". Net behavior: errors fail *open* (capture resumes). This matters
+//! on machines where the engine's AX/osascript access is denied: a single
+//! detection must not suppress capture indefinitely.
 //!
 //! Unlike DRM detection this is **forward-only** (no data deletion) and also
-//! drives the audio pipeline. The streaming-service coverage reuses
-//! `drm_detector`'s tested app/URL lists via [`crate::drm_detector::is_drm_app`]
-//! and [`crate::drm_detector::is_drm_url`]; this module only adds local players
-//! and live-sports services on top.
+//! drives the audio pipeline. It writes the shared [`screenpipe_config::media`]
+//! flag instead of a local one so the audio crate can read suppression state
+//! without depending on the engine.
 //!
 //! YouTube and Twitch are deliberately **not** auto-suppressed — that's where
 //! tutorials/podcasts live; the manual override covers the occasional
 //! movie/match watched there.
 
 use screenpipe_config::media;
-use tracing::{debug, info};
 #[cfg(target_os = "macos")]
 use tracing::warn;
+use tracing::{debug, info};
 
 /// Combined screen-capture pause predicate: DRM **or** media. The vision gates
 /// and the monitor watcher read this one predicate so they release the capture
@@ -41,41 +58,100 @@ pub fn content_capture_paused() -> bool {
     crate::drm_detector::drm_content_paused() || media::media_capture_suppressed()
 }
 
-/// Local media players (lowercased substrings). Streaming services come from
-/// `drm_detector`'s list; live-sports apps are below. Short, ambiguous names
-/// (`tv`, `mpv`) are matched exactly in [`is_media_app`] instead.
-const MEDIA_PLAYER_APPS: &[&str] = &[
+/// Allowlisted media apps (lowercased). Matched on whole-name / word boundary,
+/// never bare substring — see [`word_bounded_match`]. Covers streaming services
+/// (including the native DRM streaming apps, so audio gets suppressed there
+/// too — DRM only pauses *screen* capture), local players, and live-sports
+/// apps. Short/ambiguous names (`tv`, `mpv`, `max`) are matched *exactly* in
+/// [`is_media_app`] instead of via this list.
+const MEDIA_APPS: &[&str] = &[
+    // Streaming services (also native DRM apps — listed here so the media flag
+    // is set for the audio pipeline; DRM's own flag only gates screen capture).
+    "netflix",
+    "disney+",
+    "disney plus",
+    "hulu",
+    "prime video",
+    "apple tv",
+    "peacock",
+    "paramount+",
+    "paramount plus",
+    "crunchyroll",
+    "dazn",
+    // Local media players.
     "vlc",
     "iina",
     "quicktime player",
-    "plex",            // also matches Plexamp (media)
+    "plex",
     "infuse",
-    "elmedia",         // "Elmedia Player"
+    "elmedia", // "Elmedia Player"
     "mplayerx",
-    // Live-sports native apps (DAZN is already covered by drm_detector).
+    // Live-sports / live-media services.
     "espn",
+    "nbc sports",
+    "f1 tv",
+    "fubo",
 ];
 
-/// Check whether `app_name` is an allowlisted media app (streaming service,
-/// local player, or live-sports app).
-pub fn is_media_app(app_name: &str) -> bool {
-    // Streaming services (Netflix, Disney+, …) and DAZN — reuse the tested
-    // DRM app list rather than duplicating it.
-    if crate::drm_detector::is_drm_app(app_name) {
-        return true;
+/// Whole-name / word-boundary match of `needle` inside `haystack` (both already
+/// lowercased). A match requires a non-alphanumeric boundary (or string
+/// start/end) on *both* sides, so `"plex"` matches `"Plex"` / `"VLC media
+/// player"`-style names but NOT `"Perplexity"`. Non-alphanumeric characters
+/// (space, `+`, `-`) count as boundaries, so `"disney"` also matches `"Disney+"`.
+fn word_bounded_match(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return false;
     }
-    let lower = app_name.to_lowercase();
-    // Short names that must match exactly to avoid false positives: the macOS
-    // "TV" app and the "mpv" player.
-    if lower == "tv" || lower == "mpv" {
-        return true;
+    let hay = haystack.as_bytes();
+    let mut start = 0;
+    while let Some(pos) = haystack[start..].find(needle) {
+        let idx = start + pos;
+        let end = idx + needle.len();
+        let before_ok = idx == 0 || !hay[idx - 1].is_ascii_alphanumeric();
+        let after_ok = end == hay.len() || !hay[end].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+        // Advance past this occurrence and keep scanning for a bounded one.
+        start = idx + 1;
+        if start >= haystack.len() {
+            break;
+        }
     }
-    MEDIA_PLAYER_APPS.iter().any(|&a| lower.contains(a))
+    false
 }
 
-/// Live-sports / live-media domains not already covered by the DRM streaming
-/// list. Subdomains match (e.g. `watch.espn.com` matches `espn.com`).
+/// Whether `app_name` is on the media allowlist. Case-insensitive, whole-name /
+/// word-boundary only (never bare substring). `"tv"`, `"mpv"`, and `"max"` are
+/// matched *exactly* because as substrings/words they collide with common app
+/// names ("Television…", "improvement", "Maximize", "3ds Max").
+pub fn is_media_app(app_name: &str) -> bool {
+    let lower = app_name.to_lowercase();
+    // Exact-only names (would false-positive under word-boundary matching too:
+    // e.g. "Apple TV" contains the word "tv").
+    if lower == "tv" || lower == "mpv" || lower == "max" {
+        return true;
+    }
+    MEDIA_APPS.iter().any(|&a| word_bounded_match(&lower, a))
+}
+
+/// Allowlisted media domains (registrable-domain suffixes). Includes the DRM
+/// streaming domains (so the media flag — and thus audio suppression — fires on
+/// them too) plus live-sports / live-media services. Matched on host suffix
+/// only (`host == domain` or `host` ends with `.domain`), never `contains`.
 const MEDIA_DOMAINS: &[&str] = &[
+    // Streaming (also DRM domains — media flag drives audio; DRM gates screen).
+    "netflix.com",
+    "disneyplus.com",
+    "hulu.com",
+    "primevideo.com",
+    "tv.apple.com",
+    "peacocktv.com",
+    "paramountplus.com",
+    "play.max.com",
+    "crunchyroll.com",
+    "dazn.com",
+    // Live-sports / live-media.
     "espn.com", // covers plus.espn.com, watch.espn.com via subdomain match
     "f1tv.formula1.com",
     "nbcsports.com",
@@ -86,18 +162,17 @@ const MEDIA_DOMAINS: &[&str] = &[
     "fubo.tv",
 ];
 
-/// URL path patterns for live-media on generic domains (streaming paths like
-/// `amazon.com/gp/video/` are handled by `drm_detector`).
-const MEDIA_URL_PATHS: &[(&str, &str)] = &[("nba.com", "/watch")];
+/// URL path patterns for media on generic domains: `(host, required_path_prefix)`.
+/// Matched on exact host + path prefix, never `contains`.
+const MEDIA_URL_PATHS: &[(&str, &str)] = &[
+    ("amazon.com", "/gp/video/"), // Prime Video on the shared amazon.com host
+    ("nba.com", "/watch"),
+];
 
-/// Check whether `url` points to an allowlisted media site (streaming or
-/// live-sports).
+/// Whether `url` points to an allowlisted media site (streaming or live-sports).
+/// Host is matched on registrable-domain suffix; generic-domain services are
+/// matched on host + path prefix. Never a bare substring test.
 pub fn is_media_url(url: &str) -> bool {
-    // Streaming services (Netflix, Disney+, Prime /gp/video/, …).
-    if crate::drm_detector::is_drm_url(url) {
-        return true;
-    }
-
     let lower = url.to_lowercase();
     let host_and_path = lower
         .strip_prefix("https://")
@@ -107,24 +182,27 @@ pub fn is_media_url(url: &str) -> bool {
     let host = normalized.split('/').next().unwrap_or(normalized);
 
     for &domain in MEDIA_DOMAINS {
-        // Exact host or any subdomain (anchored on a dot to reject lookalikes).
+        // Exact host or any subdomain (anchored on a dot to reject lookalikes
+        // like "notnetflix.com" or "netflix.com.evil.com").
         if host == domain || host.strip_suffix(domain).is_some_and(|s| s.ends_with('.')) {
             return true;
         }
     }
     for &(domain, path) in MEDIA_URL_PATHS {
-        if normalized.starts_with(domain) {
-            if let Some(url_path) = normalized.strip_prefix(domain) {
-                if url_path.starts_with(path) {
-                    return true;
-                }
+        if let Some(url_path) = normalized.strip_prefix(domain) {
+            // Ensure `domain` was the whole host, not a prefix of a longer host
+            // (e.g. "amazon.com.evil.com"): the char after `domain` must be `/`
+            // (path) or end-of-string.
+            let host_boundary = url_path.is_empty() || url_path.starts_with('/');
+            if host_boundary && url_path.starts_with(path) {
+                return true;
             }
         }
     }
     false
 }
 
-/// Combined check: is the foreground content allowlisted media?
+/// Combined check: is the given foreground app/URL allowlisted media?
 pub fn is_media_content(app_name: &str, url: Option<&str>) -> bool {
     if is_media_app(app_name) {
         return true;
@@ -149,50 +227,154 @@ fn set_detected(detected: bool) {
     }
 }
 
+/// Single source of truth: is allowlisted media in the **foreground right now**?
+///
+/// Reads the frontmost app name via NSWorkspace (no TCC needed). If that app is
+/// a browser, best-effort-enriches with the focused tab's URL/title via
+/// Accessibility/AppleScript — but any failure there yields "no URL", so it can
+/// only ever *fail open* (report "no media"), never latch a pause.
+///
+/// Returns `Some(app_name)` when media is present (for logging), `None` when it
+/// is not. Does NOT read or write any flag — callers decide what to do.
+///
+/// Panic-safe: any panic from the underlying AppKit/AX calls is caught and
+/// treated as "no media" so a probe failure can only ever fail *open*.
+#[cfg(target_os = "macos")]
+fn probe_media_present() -> Option<String> {
+    let result = std::panic::catch_unwind(|| -> Option<String> {
+        // Frontmost app name — authoritative, no permission required.
+        let app_name = frontmost_app_name()?;
+
+        if is_media_app(&app_name) {
+            return Some(app_name);
+        }
+
+        // Browser: best-effort URL/title enrichment. Errors → no URL → no match.
+        if crate::drm_detector::is_browser(&app_name) {
+            if let Some(url) = best_effort_browser_media_url() {
+                if is_media_url(&url) {
+                    debug!("browser '{}' on media URL: {}", app_name, url);
+                    return Some(app_name);
+                }
+            }
+        }
+        None
+    });
+    match result {
+        Ok(v) => v,
+        Err(_) => {
+            warn!("panic probing frontmost app for media — treating as no media (fail open)");
+            None
+        }
+    }
+}
+
+/// Frontmost app name via NSWorkspace — needs no Accessibility/Automation
+/// permission, so this is our reliable base signal (mirrors
+/// `event_driven_capture::query_frontmost_app_name_uncached`). Wrapped in an
+/// autorelease pool because `running_apps()` returns autoreleased objects.
+#[cfg(target_os = "macos")]
+fn frontmost_app_name() -> Option<String> {
+    use cidre::{ns, objc};
+    objc::ar_pool(|| {
+        let workspace = ns::Workspace::shared();
+        for app in workspace.running_apps().iter() {
+            if app.is_active() {
+                return app.localized_name().map(|s| s.to_string());
+            }
+        }
+        None
+    })
+    .filter(|n| !n.is_empty())
+}
+
+/// Best-effort focused-tab URL for the frontmost browser, matched against the
+/// media allowlist. Uses AX/AppleScript (may be TCC-denied) then a window-title
+/// keyword fallback; every path is fallible and returns `None` on any error,
+/// so enrichment can never keep a pause alive on its own.
+#[cfg(target_os = "macos")]
+fn best_effort_browser_media_url() -> Option<String> {
+    use cidre::{ax, ns};
+
+    let result = std::panic::catch_unwind(|| -> Option<String> {
+        let sys = ax::UiElement::sys_wide();
+        let app = sys.focused_app().ok()?;
+        let pid = app.pid().ok()?;
+        let name = ns::RunningApp::with_pid(pid)
+            .and_then(|a| a.localized_name())
+            .map(|s| s.to_string())?;
+        if !crate::drm_detector::is_browser(&name) {
+            return None;
+        }
+        crate::drm_detector::get_browser_url_ax(&app, &name)
+            .or_else(|| get_media_url_from_window_title(&app))
+    });
+    result.unwrap_or(None)
+}
+
 /// Update the shared media `DETECTED` flag from the resolved foreground
 /// app/URL. Returns `true` if capture should be suppressed right now.
 ///
 /// Called from the focus-resolution point in the capture loop (next to
 /// `check_and_update_drm_state`). Reads the feature toggle from the shared
 /// flag (synced from config) rather than taking it as a parameter — media has
-/// its own `ENABLED` global, unlike DRM.
+/// its own `ENABLED` global, unlike DRM. On non-macOS, detection never sets
+/// `DETECTED` (only the manual override drives suppression).
 pub fn check_and_update_media_state(app_name: Option<&str>, browser_url: Option<&str>) -> bool {
     if !media::enabled() {
         if media::media_detected() {
             set_detected(false);
         }
-        return false;
+        // Manual override is independent of the auto-detect setting.
+        return media::media_capture_suppressed();
     }
 
-    let app = app_name.unwrap_or("");
-    if is_media_content(app, browser_url) {
-        debug!(
-            "media content in foreground: app={:?}, url={:?}",
-            app_name, browser_url
-        );
-        set_detected(true);
-        true
-    } else if !app.is_empty() {
-        set_detected(false);
-        // A manual override can still suppress even when the focused app isn't
-        // media (e.g. user hit "pause 2h" while on a normal app).
-        media::media_capture_suppressed()
-    } else {
-        // Unknown app — preserve current state.
-        media::media_capture_suppressed()
+    #[cfg(target_os = "macos")]
+    {
+        let app = app_name.unwrap_or("");
+        if is_media_content(app, browser_url) {
+            debug!(
+                "media content in foreground: app={:?}, url={:?}",
+                app_name, browser_url
+            );
+            set_detected(true);
+        } else if !app.is_empty() {
+            // Focused app is known and not media — clear any auto-detect pause.
+            // A manual override can still suppress (checked below).
+            set_detected(false);
+        }
+        // else: unknown app — preserve current DETECTED state.
     }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Detection is macOS-only: never set DETECTED off-mac (avoids a
+        // stop/start flap in the watcher, since the setting defaults on).
+        let _ = (app_name, browser_url);
+        if media::media_detected() {
+            set_detected(false);
+        }
+    }
+
+    media::media_capture_suppressed()
 }
 
 /// Pre-capture media gate — called BEFORE any ScreenCaptureKit call.
 ///
-/// Uses only Accessibility APIs to check if the focused app/URL is allowlisted
-/// media. When media is detected (or a manual override is active) returns
-/// `true` so the caller skips the capture entirely. Does NOT clear the pause —
-/// that is [`poll_media_clear`]'s job.
+/// Returns `true` when capture should be skipped: either a manual override /
+/// prior detection is already suppressing, or [`probe_media_present`] finds
+/// media in the foreground now. Uses only NSWorkspace + best-effort AX (no
+/// SCK). Does NOT clear the pause — that is [`poll_media_clear`]'s job.
+///
+/// `_trigger_app_name` (e.g. from an AppSwitch event) is accepted for call-site
+/// symmetry with the DRM gate but not trusted as the sole signal: the probe
+/// always re-reads the true frontmost app so a stale/racing trigger can't pin
+/// a pause.
 #[cfg(target_os = "macos")]
-pub fn pre_capture_media_check(trigger_app_name: Option<&str>) -> bool {
+pub fn pre_capture_media_check(_trigger_app_name: Option<&str>) -> bool {
     // Manual override or a prior detection already suppressing — stay paused
-    // without re-querying. (Manual works whenever the feature is enabled.)
+    // without re-querying. (Manual works whenever it is armed, even if the
+    // auto-detect setting is off.)
     if media::media_capture_suppressed() {
         return true;
     }
@@ -200,129 +382,68 @@ pub fn pre_capture_media_check(trigger_app_name: Option<&str>) -> bool {
         return false;
     }
 
-    let result = std::panic::catch_unwind(|| -> bool {
-        // Fast path: use the trigger app name if available.
-        if let Some(app) = trigger_app_name {
-            if is_media_app(app) {
-                info!("pre-capture media check: media app '{}' — pausing", app);
-                set_detected(true);
-                return true;
-            }
-            if crate::drm_detector::is_browser(app) {
-                // Browser switch — need the URL to decide.
-                if let Some((ref name, ref url)) = get_focused_app_info() {
-                    debug!(
-                        "pre-capture media check: browser trigger='{}', focused='{}', url={:?}",
-                        app, name, url
-                    );
-                    if let Some(ref u) = url {
-                        if is_media_url(u) {
-                            info!(
-                                "pre-capture media check: browser '{}' on media URL {} — pausing",
-                                app, u
-                            );
-                            set_detected(true);
-                            return true;
-                        }
-                    }
-                }
-            }
-            return false;
-        }
-
-        // No trigger app name (Idle, Click, etc.) — query the focused app.
-        if let Some((app_name, url)) = get_focused_app_info() {
-            if is_media_content(&app_name, url.as_deref()) {
-                info!(
-                    "pre-capture media check: focused app='{}', url={:?} — pausing",
-                    app_name, url
-                );
-                set_detected(true);
-                return true;
-            }
-            debug!(
-                "pre-capture media check: focused app='{}', url={:?} — no media",
-                app_name, url
-            );
-        }
-
+    if let Some(app) = probe_media_present() {
+        info!(
+            "pre-capture media check: media in foreground ('{}') — pausing",
+            app
+        );
+        set_detected(true);
+        true
+    } else {
         false
-    });
-
-    result.unwrap_or(false)
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
 pub fn pre_capture_media_check(_trigger_app_name: Option<&str>) -> bool {
-    // Manual override still works cross-platform; detection is macOS-only.
+    // Manual override still works cross-platform; auto-detection is macOS-only.
     media::media_capture_suppressed()
 }
 
-/// Query the current foreground app and decide whether the media pause should
-/// stay active. Called from the monitor watcher while paused to detect resume.
+/// Re-evaluate the media pause while paused. Called from the monitor watcher to
+/// decide when to resume. Same single probe as the pre-capture gate, so
+/// detection and clearing can never disagree.
 ///
-/// Uses only Accessibility APIs and `CGWindowList` (no ScreenCaptureKit).
-/// Returns `true` if media is still active (stay paused). Clears `DETECTED`
-/// when the focused app isn't media and no media window is visible.
-///
-/// A manual override keeps the pause active regardless of what's focused.
+/// Returns `true` to stay paused, `false` to resume. A manual override keeps
+/// the pause active regardless of focus. If auto-detect is off, only the manual
+/// override matters. On any probe failure the pause **clears** (fail open):
+/// media detection latching forever is the worst outcome for a capture tool.
 #[cfg(target_os = "macos")]
 pub fn poll_media_clear() -> bool {
     if !media::enabled() {
-        set_detected(false);
-        return false;
+        // Auto-detect off: drop any lingering detection; manual may still hold.
+        if media::media_detected() {
+            set_detected(false);
+        }
+        return media::media_capture_suppressed();
     }
     // Manual override outlives any focus change.
     if media::manual_active() {
         return true;
     }
 
-    let result =
-        std::panic::catch_unwind(|| -> Option<(String, Option<String>)> { get_focused_app_info() });
-
-    match result {
-        Ok(Some((app_name, url))) => {
-            if is_media_app(&app_name) {
-                debug!("media app still focused: {}", app_name);
-                return true;
+    match probe_media_present() {
+        Some(app) => {
+            debug!("media still in foreground: {}", app);
+            // Ensure DETECTED reflects reality (it may have been cleared).
+            if !media::media_detected() {
+                set_detected(true);
             }
-            if crate::drm_detector::is_browser(&app_name) {
-                if let Some(ref u) = url {
-                    if is_media_url(u) {
-                        debug!("browser '{}' still on media URL: {}", app_name, u);
-                        return true;
-                    }
-                }
-            }
-            // Focused app isn't media — but a media window may still be visible
-            // on another monitor (e.g. a movie playing on a second display).
-            if any_media_window_on_screen() {
-                debug!(
-                    "focused app '{}' is not media, but a media window is still visible — keeping pause",
-                    app_name
-                );
-                return true;
-            }
+            true
+        }
+        None => {
+            // No media in the foreground — resume (fail open on AX errors too,
+            // since the probe reports None rather than keeping the pause).
             set_detected(false);
             false
-        }
-        Ok(None) => {
-            debug!("could not determine focused app, keeping media pause");
-            true
-        }
-        Err(_) => {
-            warn!("panic querying focused app, keeping media pause");
-            true
         }
     }
 }
 
 #[cfg(not(target_os = "macos"))]
 pub fn poll_media_clear() -> bool {
-    // No AX-based detection off macOS; only the manual override drives pause.
-    if !media::manual_active() {
-        set_detected(false);
-    }
+    // No AX-based detection off macOS. DETECTED is never set here, so this only
+    // reflects the manual override — and reports no transition when idle.
     media::media_capture_suppressed()
 }
 
@@ -350,34 +471,9 @@ const MEDIA_TITLE_ALIASES: &[(&str, &str)] = &[
     ("fubo", "https://fubo.tv"),
 ];
 
-/// Query the focused app name and (for browsers) its URL using only
-/// Accessibility APIs. No ScreenCaptureKit calls. Falls back to a media-keyword
-/// window-title scan for browsers that don't expose a URL.
-#[cfg(target_os = "macos")]
-fn get_focused_app_info() -> Option<(String, Option<String>)> {
-    use cidre::{ax, ns};
-
-    let sys = ax::UiElement::sys_wide();
-    let app = sys.focused_app().ok()?;
-    let pid = app.pid().ok()?;
-    let name = ns::RunningApp::with_pid(pid)
-        .and_then(|app| app.localized_name())
-        .map(|s| s.to_string())?;
-
-    let url = if crate::drm_detector::is_browser(&name) {
-        // Real URL first (AXDocument / AppleScript — generic, reused from the
-        // DRM module), then the media-title fallback.
-        crate::drm_detector::get_browser_url_ax(&app, &name)
-            .or_else(|| get_media_url_from_window_title(&app))
-    } else {
-        None
-    };
-
-    Some((name, url))
-}
-
 /// Check the focused window's title for known media keywords. Returns a
-/// synthesized allowlisted URL if a match is found.
+/// synthesized allowlisted URL if a match is found. Best-effort — used only as
+/// a last resort inside [`best_effort_browser_media_url`].
 #[cfg(target_os = "macos")]
 fn get_media_url_from_window_title(app: &cidre::ax::UiElement) -> Option<String> {
     use cidre::{ax, cf};
@@ -404,82 +500,16 @@ fn get_media_url_from_window_title(app: &cidre::ax::UiElement) -> Option<String>
     None
 }
 
-/// Check if any on-screen window belongs to a media app or has a media-related
-/// title. Uses `CGWindowListCopyWindowInfo` (CoreGraphics) — does NOT touch
-/// ScreenCaptureKit. Catches a media window that is visible but not focused
-/// (multi-monitor case).
-#[cfg(target_os = "macos")]
-fn any_media_window_on_screen() -> bool {
-    use cidre::cg;
-
-    let windows = match cg::WindowList::info(cg::WindowListOpt::ON_SCREEN_ONLY, cg::WINDOW_ID_NULL)
-    {
-        Some(w) => w,
-        None => {
-            debug!("CGWindowListCopyWindowInfo returned null");
-            return false;
-        }
-    };
-
-    let key_owner = cg::window_keys::owner_name();
-    let key_name = cg::window_keys::name();
-    let key_layer = cg::window_keys::layer();
-
-    for i in 0..windows.len() {
-        let dict = &windows[i];
-
-        // Skip windows not on layer 0 (menu bar items, overlays, etc.)
-        if let Some(layer_val) = dict.get(key_layer) {
-            if let Some(layer_num) = layer_val.try_as_number() {
-                if let Some(layer) = layer_num.to_i32() {
-                    if layer != 0 {
-                        continue;
-                    }
-                }
-            }
-        }
-
-        if let Some(owner_val) = dict.get(key_owner) {
-            if let Some(owner_cf) = owner_val.try_as_string() {
-                let owner_str = owner_cf.to_string();
-
-                if is_media_app(&owner_str) {
-                    debug!("media window still on screen: app='{}'", owner_str);
-                    return true;
-                }
-
-                // For browsers, check the window title for media keywords.
-                if crate::drm_detector::is_browser(&owner_str) {
-                    if let Some(name_val) = dict.get(key_name) {
-                        if let Some(name_cf) = name_val.try_as_string() {
-                            let title = name_cf.to_string().to_lowercase();
-                            for &(keyword, _) in MEDIA_TITLE_ALIASES {
-                                if title.contains(keyword) {
-                                    debug!(
-                                        "media window still on screen: browser='{}', title contains '{}'",
-                                        owner_str, keyword
-                                    );
-                                    return true;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    /// Tests that touch the shared media flag must hold this mutex to avoid
-    /// racing with each other (cargo test runs in parallel).
-    static MEDIA_FLAG_LOCK: Mutex<()> = Mutex::new(());
+    /// Cross-module test lock: media and DRM tests mutate overlapping
+    /// process-global statics, so every test touching either flag serializes on
+    /// the same mutex (see [`crate::drm_detector::test_flag_lock`]).
+    fn lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::drm_detector::test_flag_lock()
+    }
 
     fn reset_enabled_clean() {
         media::set_pause_on_media_playback(true);
@@ -490,16 +520,23 @@ mod tests {
     // ── allowlist matching ────────────────────────────────────────────
 
     #[test]
-    fn media_app_streaming_reused_from_drm() {
+    fn media_app_streaming() {
         assert!(is_media_app("Netflix"));
         assert!(is_media_app("Disney+"));
         assert!(is_media_app("Prime Video"));
         assert!(is_media_app("DAZN"));
+        assert!(is_media_app("Hulu"));
+        assert!(is_media_app("Apple TV"));
+        assert!(is_media_app("Peacock"));
+        assert!(is_media_app("Paramount+"));
+        assert!(is_media_app("Crunchyroll"));
+        assert!(is_media_app("Max")); // HBO Max app, exact match
     }
 
     #[test]
     fn media_app_local_players_and_sports() {
         assert!(is_media_app("VLC"));
+        assert!(is_media_app("VLC media player"));
         assert!(is_media_app("IINA"));
         assert!(is_media_app("QuickTime Player"));
         assert!(is_media_app("mpv"));
@@ -509,6 +546,9 @@ mod tests {
         assert!(is_media_app("MPlayerX"));
         assert!(is_media_app("TV")); // macOS Apple TV app, exact match
         assert!(is_media_app("ESPN"));
+        assert!(is_media_app("NBC Sports"));
+        assert!(is_media_app("F1 TV"));
+        assert!(is_media_app("Fubo"));
     }
 
     #[test]
@@ -516,16 +556,33 @@ mod tests {
         assert!(!is_media_app("Finder"));
         assert!(!is_media_app("Safari"));
         assert!(!is_media_app("Terminal"));
-        assert!(!is_media_app("Television Repair Notes")); // "tv" only matches exactly
-        assert!(!is_media_app("Improvement")); // not "mpv"
         assert!(!is_media_app("Zoom"));
         assert!(!is_media_app("Microsoft Teams"));
+        // "tv" / "mpv" / "max" only match exactly, never as a substring/word.
+        assert!(!is_media_app("Television Repair Notes"));
+        assert!(!is_media_app("Improvement")); // not "mpv"
+        assert!(!is_media_app("Maximize"));
+        assert!(!is_media_app("3ds Max")); // "max" only matches the whole name
+                                           // Word-boundary, not substring: "plex" must NOT match "Perplexity".
+        assert!(!is_media_app("Perplexity"));
+        assert!(!is_media_app("Perplexity AI"));
+        // Remote-desktop apps are NOT media (they belong to drm_detector only).
+        assert!(!is_media_app("Omnissa Horizon Client"));
+        assert!(!is_media_app("VMware Horizon Client"));
+        assert!(!is_media_app("horizon client"));
     }
 
     #[test]
     fn media_url_streaming_and_sports() {
-        // streaming (delegated to drm_detector)
+        // streaming
         assert!(is_media_url("https://netflix.com/watch/123"));
+        assert!(is_media_url("https://www.netflix.com/browse"));
+        assert!(is_media_url("https://disneyplus.com/video/abc"));
+        assert!(is_media_url(
+            "https://apps.disneyplus.com/il/shows/scrubs/123/watch"
+        ));
+        assert!(is_media_url("https://hulu.com/watch"));
+        assert!(is_media_url("https://play.max.com/movie/abc"));
         assert!(is_media_url(
             "https://www.amazon.com/gp/video/detail/B0CXGTK4HY"
         ));
@@ -549,9 +606,14 @@ mod tests {
         // YouTube / Twitch are intentionally NOT auto-suppressed.
         assert!(!is_media_url("https://youtube.com/watch?v=abc"));
         assert!(!is_media_url("https://twitch.tv/somestreamer"));
-        // lookalike domains must not match
+        // lookalike / suffix-injection domains must not match
         assert!(!is_media_url("https://espn.com.evil.com/phish"));
+        assert!(!is_media_url("https://netflix.com.evil.com/phish"));
+        assert!(!is_media_url("https://notnetflix.com/page"));
         assert!(!is_media_url("https://notespn.com/page"));
+        assert!(!is_media_url("https://amazon.com.evil.com/gp/video/x"));
+        // amazon.com without the video path is a normal site
+        assert!(!is_media_url("https://amazon.com/dp/B09V3KXJPB"));
         // nba.com without the /watch path is a normal site
         assert!(!is_media_url("https://nba.com/news/article"));
     }
@@ -559,7 +621,10 @@ mod tests {
     #[test]
     fn media_content_combined() {
         assert!(is_media_content("VLC", None));
-        assert!(is_media_content("Google Chrome", Some("https://espn.com/nfl")));
+        assert!(is_media_content(
+            "Google Chrome",
+            Some("https://espn.com/nfl")
+        ));
         assert!(is_media_content("Netflix", None));
         assert!(!is_media_content("Finder", Some("https://google.com")));
         assert!(!is_media_content("Finder", None));
@@ -574,7 +639,7 @@ mod tests {
 
     #[test]
     fn check_and_update_sets_flag_on_media() {
-        let _l = MEDIA_FLAG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _l = lock();
         reset_enabled_clean();
         assert!(check_and_update_media_state(Some("VLC"), None));
         assert!(media::media_capture_suppressed());
@@ -585,19 +650,35 @@ mod tests {
         media::set_pause_on_media_playback(false);
     }
 
+    /// Finding #9: the native DRM streaming apps must also be on the media
+    /// allowlist, so the media flag (and thus audio suppression) fires when a
+    /// native Netflix-style app is focused — the DRM path only gates *screen*
+    /// capture.
+    #[test]
+    fn check_and_update_sets_flag_on_native_drm_app() {
+        let _l = lock();
+        reset_enabled_clean();
+        assert!(check_and_update_media_state(Some("Netflix"), None));
+        assert!(media::media_detected());
+        assert!(media::media_capture_suppressed());
+        reset_enabled_clean();
+        media::set_pause_on_media_playback(false);
+    }
+
     #[test]
     fn check_and_update_noop_when_disabled() {
-        let _l = MEDIA_FLAG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _l = lock();
         reset_enabled_clean();
         media::set_pause_on_media_playback(false);
         assert!(!check_and_update_media_state(Some("Netflix"), None));
         assert!(!media::media_capture_suppressed());
         assert!(!media::media_detected());
+        media::clear_manual_pause();
     }
 
     #[test]
     fn manual_override_keeps_suppressed_on_normal_app() {
-        let _l = MEDIA_FLAG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _l = lock();
         reset_enabled_clean();
         media::start_manual_pause(None);
         // Even on a normal app, the manual override keeps capture suppressed.
@@ -607,9 +688,23 @@ mod tests {
         media::set_pause_on_media_playback(false);
     }
 
+    /// Finding #1: a manual pause works even when the auto-detect setting is
+    /// off — check_and_update reports suppression, and detection stays clear.
+    #[test]
+    fn manual_override_works_when_disabled() {
+        let _l = lock();
+        reset_enabled_clean();
+        media::set_pause_on_media_playback(false);
+        media::start_manual_pause(None);
+        assert!(check_and_update_media_state(Some("Finder"), None));
+        assert!(media::media_capture_suppressed());
+        assert!(!media::media_detected());
+        media::clear_manual_pause();
+    }
+
     #[test]
     fn content_capture_paused_ors_drm_and_media() {
-        let _l = MEDIA_FLAG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _l = lock();
         reset_enabled_clean();
         crate::drm_detector::set_drm_paused(false);
         assert!(!content_capture_paused());

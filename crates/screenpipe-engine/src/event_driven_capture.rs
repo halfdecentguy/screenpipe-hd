@@ -678,9 +678,16 @@ pub async fn event_driven_capture_loop(
     // Skip if screen is locked — avoids storing black frames from sleep/lock.
     // Pre-capture DRM gate: skip if DRM content is focused (AX-only, no SCK).
     // Skip if outside work-hours schedule.
+    //
+    // Run BOTH content gates (not `&&`-short-circuited): the media check has the
+    // side effect of setting the shared media/audio flag, and a native DRM
+    // streaming app is also media — if DRM short-circuited it, audio would keep
+    // recording at startup (finding #9).
+    let startup_drm_pause = crate::drm_detector::pre_capture_drm_check(pause_on_drm_content, None);
+    let startup_media_pause = crate::media_detector::pre_capture_media_check(None);
     if !crate::sleep_monitor::screen_is_locked()
-        && !crate::drm_detector::pre_capture_drm_check(pause_on_drm_content, None)
-        && !crate::media_detector::pre_capture_media_check(None)
+        && !startup_drm_pause
+        && !startup_media_pause
         && !crate::schedule_monitor::schedule_paused()
     {
         // Small delay to let the monitor settle after startup
@@ -1237,8 +1244,17 @@ pub async fn event_driven_capture_loop(
                         CaptureTrigger::AppSwitch { app_name, .. } => Some(app_name.as_str()),
                         _ => None,
                     };
-                    if crate::drm_detector::pre_capture_drm_check(pause_on_drm_content, trigger_app)
-                    {
+                    // Evaluate BOTH gates (no short-circuit): the media gate has
+                    // the side effect of updating the shared media/audio flag,
+                    // and a native DRM streaming app is also media — only the
+                    // media flag suppresses AUDIO. If DRM short-circuited it,
+                    // transcription would keep running on Netflix etc. (#9).
+                    let drm_blocked = crate::drm_detector::pre_capture_drm_check(
+                        pause_on_drm_content,
+                        trigger_app,
+                    );
+                    let media_blocked = crate::media_detector::pre_capture_media_check(trigger_app);
+                    if drm_blocked {
                         debug!(
                             "pre-capture DRM check blocked capture on monitor {}",
                             monitor_id
@@ -1258,7 +1274,7 @@ pub async fn event_driven_capture_loop(
                     // Media-playback gate (movies / TV / live sports + manual
                     // override). Reported as a pause-state drop, same as the
                     // lock / power / schedule pauses.
-                    if crate::media_detector::pre_capture_media_check(trigger_app) {
+                    if media_blocked {
                         debug!(
                             "pre-capture media check blocked capture on monitor {}",
                             monitor_id
@@ -2052,27 +2068,24 @@ async fn do_capture(
     // DRM content detection: check if the focused app/URL is a streaming service.
     // When detected, set the global pause flag so ALL monitors stop capture
     // and the monitor watcher releases all SCK handles.
-    if crate::drm_detector::check_and_update_drm_state(
+    //
+    // Media-playback detection (movies / TV / live sports) must run REGARDLESS
+    // of the DRM outcome: a native streaming app (e.g. the Netflix app) trips
+    // DRM *and* is media, and only the media flag suppresses AUDIO. If we
+    // short-circuited on DRM, `DETECTED` would stay false and transcription
+    // would keep running in exactly the case this feature exists for
+    // (finding #9). Both flags may legitimately be set at once. Evaluate both,
+    // then skip the capture if either wants a pause.
+    let drm_pause = crate::drm_detector::check_and_update_drm_state(
         params.pause_on_drm_content,
         app_name_owned.as_deref(),
         browser_url_owned.as_deref(),
-    ) {
-        return Ok(CaptureOutput {
-            result: None,
-            image,
-            elements_deduped: false,
-        });
-    }
-
-    // Media-playback detection (movies / TV / live sports). Sets the shared
-    // media flag from the resolved app/URL so ALL monitors pause and the
-    // monitor watcher releases SCK handles — same mechanism as DRM, but it
-    // also drives the audio pipeline. Reads its own ENABLED global (no config
-    // param threaded through the vision pipeline).
-    if crate::media_detector::check_and_update_media_state(
+    );
+    let media_pause = crate::media_detector::check_and_update_media_state(
         app_name_owned.as_deref(),
         browser_url_owned.as_deref(),
-    ) {
+    );
+    if drm_pause || media_pause {
         return Ok(CaptureOutput {
             result: None,
             image,

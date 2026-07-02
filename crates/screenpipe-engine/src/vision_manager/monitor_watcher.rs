@@ -109,22 +109,33 @@ pub async fn start_monitor_watcher(
                     }
                     content_stopped = true;
                 }
-                // Poll focused app (Accessibility/CG only, no SCK) to detect
-                // when the user switches away. Evaluate BOTH clears (no
-                // short-circuit) so each maintains its own flag; a manual media
-                // pause keeps the media side active regardless of focus.
-                let still_drm = tokio::task::spawn_blocking(drm_detector::poll_drm_clear)
-                    .await
-                    .unwrap_or(true);
-                let still_media =
-                    tokio::task::spawn_blocking(crate::media_detector::poll_media_clear)
-                        .await
-                        .unwrap_or(true);
-                if still_drm || still_media {
+                // Re-probe only the source(s) actually holding the pause, so we
+                // don't do double AX/CGWindowList/osascript work every tick:
+                //  - poll_drm_clear only while the DRM flag is set;
+                //  - poll_media_clear only while media auto-detect (DETECTED) is
+                //    set.
+                // Each poll is called for its side effect (clearing its own flag
+                // when the content is gone); the combined predicate below is the
+                // single exit condition. A manual-only media pause (DETECTED
+                // false, DRM false) needs NO AX poll at all — it expires by wall
+                // clock, and re-evaluating `content_capture_paused()` each tick
+                // is enough to wake up and resume when the deadline passes.
+                if drm_detector::drm_content_paused() {
+                    let _ = tokio::task::spawn_blocking(drm_detector::poll_drm_clear).await;
+                }
+                if screenpipe_config::media::media_detected() {
+                    let _ =
+                        tokio::task::spawn_blocking(crate::media_detector::poll_media_clear).await;
+                }
+                // Single exit condition: re-evaluate the combined predicate,
+                // which now reflects any flags the polls cleared plus manual
+                // auto-expiry. If still paused, sleep and loop; else fall
+                // through to restart below.
+                if crate::media_detector::content_capture_paused() {
                     tokio::time::sleep(Duration::from_secs(2)).await;
                     continue;
                 }
-                // Both cleared — fall through to restart below.
+                // Cleared — fall through to restart below.
             }
 
             if content_stopped {

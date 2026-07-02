@@ -796,9 +796,10 @@ fn create_dynamic_menu(
 
             // Media pause override — stop both pipelines while watching a
             // movie / TV / live sports the allowlist misses (e.g. YouTube,
-            // Twitch). Sets the shared media flag; the engine auto-resumes when
-            // the timer ends or you switch away. Distinct from "Pause for…"
-            // (longer presets, an "until I turn it off" mode, and watch-aware).
+            // Twitch). Sets the shared media flag; capture resumes when the
+            // timer ends or via "Resume capture now" — switching apps clears
+            // only auto-detected pauses, never this manual one. Distinct from
+            // "Pause for…" (longer presets plus an "until I turn it off" mode).
             let media_submenu = if screenpipe_config::media::manual_active() {
                 SubmenuBuilder::new(app, "Watching — capture paused")
                     .item(
@@ -1043,8 +1044,8 @@ fn handle_menu_event(app_handle: &AppHandle, event: tauri::menu::MenuEvent) {
         id if id.starts_with("media_pause_") => {
             // Manual media-pause override (movies / TV / live sports). Just
             // sets the shared flag; the in-process engine's capture loops and
-            // audio loop react within a couple seconds and auto-resume when the
-            // timer ends or you switch away. No recording-toggle change.
+            // audio loop react within a couple seconds and auto-resume when
+            // the timer ends. No recording-toggle change.
             let suffix = id.strip_prefix("media_pause_").unwrap_or("");
             let (title, body): (&str, String) = match suffix {
                 "resume" => {
@@ -1076,7 +1077,7 @@ fn handle_menu_event(app_handle: &AppHandle, event: tauri::menu::MenuEvent) {
                     };
                     (
                         "Paused while watching",
-                        format!("Capture auto-resumes in {} (or when you switch away).", pretty),
+                        format!("Capture auto-resumes in {}.", pretty),
                     )
                 }
             };

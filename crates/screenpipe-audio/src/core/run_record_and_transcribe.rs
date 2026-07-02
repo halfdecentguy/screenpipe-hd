@@ -288,9 +288,14 @@ pub async fn run_record_and_transcribe(
             continue;
         }
         if was_paused_for_media {
+            // Drain the backlog the upstream stream buffered while we slept in
+            // the suppressed branch, otherwise recv_audio_chunk would replay
+            // pre-resume media audio into Whisper. See drain_broadcast_backlog.
+            let dropped = drain_broadcast_backlog(&mut receiver);
             info!(
-                "media playback over — resuming audio capture for {}",
-                device_name
+                "media playback over — resuming audio capture for {} \
+                 (dropped {} buffered chunk(s) captured during the pause)",
+                device_name, dropped
             );
             was_paused_for_media = false;
             segment_start_time = now_epoch_secs();
@@ -299,8 +304,12 @@ pub async fn run_record_and_transcribe(
         while collected_audio.len() < max_samples
             && is_running.load(Ordering::Relaxed)
             // Bail out of the segment as soon as suppression starts so the
-            // live meeting tap stops streaming immediately; the partial
-            // segment is dropped by the manager's capture-time gate.
+            // live meeting tap stops streaming immediately. The partial
+            // segment is then dropped so it never straddles the boundary:
+            //   - incognito: dropped by the manager's capture-time gate
+            //     (retroactive ±5min privacy margin, manager.rs).
+            //   - media: dropped at the source right after this loop — the
+            //     manager gate only checks incognito, so media must drop here.
             && !screenpipe_config::incognito::audio_suppressed_for_incognito()
             && !screenpipe_config::media::audio_suppressed_for_media()
         {
@@ -333,6 +342,18 @@ pub async fn run_record_and_transcribe(
                 }
                 None => continue,
             }
+        }
+
+        // If the inner loop ended because media suppression just started, drop
+        // the partial buffer instead of flushing it. Unlike incognito (whose
+        // in-flight segment is caught by the manager's capture-time gate),
+        // there is no media capture-time gate — so the pre-media tail would
+        // otherwise reach Whisper. Forward-only: a few seconds of pre-media
+        // audio lost at the boundary is accepted. The outer media branch above
+        // then takes over the pause on the next iteration.
+        if screenpipe_config::media::audio_suppressed_for_media() {
+            collected_audio.clear();
+            continue;
         }
 
         segment_count += 1;
@@ -510,6 +531,34 @@ async fn recv_audio_chunk(
             ))
         }
     }
+}
+
+/// Discard everything currently buffered in the recorder's broadcast receiver,
+/// returning the number of chunks dropped.
+///
+/// Used on the media-pause → resume transition. While the record loop sleeps in
+/// the suppressed branch it stops draining, but the upstream CPAL stream keeps
+/// pushing chunks into the broadcast channel (capacity 1000), so a backlog of
+/// pre-resume media audio accumulates. Replaying it through `recv_audio_chunk`
+/// on resume would feed that media audio to Whisper — exactly what the pause is
+/// meant to prevent. Draining forward-only here is fine: losing a borderline
+/// chunk captured at the resume instant is accepted.
+///
+/// `try_recv` is non-blocking. `Empty` means the backlog is cleared (done).
+/// `Lagged(_)` means the channel already overwrote older chunks — keep draining
+/// to skip past whatever remains. `Closed` means the sender is gone — nothing
+/// left to drain.
+fn drain_broadcast_backlog(receiver: &mut broadcast::Receiver<Vec<f32>>) -> usize {
+    use tokio::sync::broadcast::error::TryRecvError;
+    let mut dropped = 0usize;
+    loop {
+        match receiver.try_recv() {
+            Ok(_) => dropped += 1,
+            Err(TryRecvError::Lagged(_)) => continue,
+            Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
+        }
+    }
+    dropped
 }
 
 fn now_epoch_secs() -> u64 {
@@ -820,5 +869,151 @@ mod tests {
             .expect("pipeline shutdown timeout")
             .expect("pipeline task");
         pipeline_result.expect("pipeline result");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drain_broadcast_backlog_discards_all_buffered_chunks() {
+        let (tx, _) = broadcast::channel::<Vec<f32>>(1000);
+        let mut rx = tx.subscribe();
+        for _ in 0..25 {
+            tx.send(vec![0.5; 320]).expect("send buffered chunk");
+        }
+
+        let dropped = drain_broadcast_backlog(&mut rx);
+
+        assert_eq!(dropped, 25, "every buffered chunk should be drained");
+        // Receiver is now empty: a fresh chunk still arrives (cursor advanced,
+        // not closed), proving we drained rather than tore the channel down.
+        tx.send(vec![0.1; 320]).expect("send post-drain chunk");
+        assert!(matches!(rx.try_recv(), Ok(chunk) if chunk == vec![0.1; 320]));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drain_broadcast_backlog_on_empty_receiver_returns_zero() {
+        let (tx, _) = broadcast::channel::<Vec<f32>>(16);
+        let mut rx = tx.subscribe();
+        assert_eq!(drain_broadcast_backlog(&mut rx), 0);
+        // Keep the sender alive until after the drain so try_recv sees Empty,
+        // not Closed (both terminate the drain identically, but this asserts
+        // the ordinary "nothing buffered" path).
+        drop(tx);
+    }
+
+    /// End-to-end guard for both media-pause boundaries. A sentinel-valued
+    /// "movie" burst is buffered while media suppression is active, then
+    /// suppression is lifted and real speech is sent. The recorder must never
+    /// transcribe the sentinel: fix (a) drops the partial pre-pause segment at
+    /// the source, and fix (b) drains the backlog buffered during the pause.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn media_pause_never_transcribes_buffered_movie_audio() {
+        // Serialize on the process-global media flag: parallel test threads
+        // must not race on it (mirrors the incognito/media config test locks).
+        // Async-aware Mutex so the guard can be held across the awaits below
+        // without tripping clippy's `await_holding_lock`.
+        static MEDIA_FLAG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _flag_guard = MEDIA_FLAG_LOCK.lock().await;
+        screenpipe_config::media::clear_manual_pause();
+
+        const SENTINEL: f32 = 0.9; // "movie" audio that must never be transcribed
+        const SPEECH: f32 = 0.2; // post-resume audio that may be transcribed
+        let sample_rate = 16_000_u32;
+        let chunk_samples = 320_usize;
+
+        let device = Arc::new(AudioDevice::new(
+            "Media Pause Test Mic".to_string(),
+            DeviceType::Input,
+        ));
+        let (audio_stream, tx) = AudioStream::from_sender_for_test(device, sample_rate, 1);
+        let audio_stream = Arc::new(audio_stream);
+        let (whisper_tx, whisper_rx) = crossbeam::channel::bounded::<AudioInput>(64);
+        let is_running = Arc::new(AtomicBool::new(true));
+        let metrics = Arc::new(AudioPipelineMetrics::new());
+
+        // Start suppressed BEFORE the recorder consumes anything, so the movie
+        // burst below lands in the broadcast backlog rather than a segment.
+        screenpipe_config::media::start_manual_pause(None);
+
+        let pipeline = tokio::spawn({
+            let audio_stream = audio_stream.clone();
+            let whisper_tx = Arc::new(whisper_tx);
+            let is_running = is_running.clone();
+            let metrics = metrics.clone();
+            async move {
+                run_record_and_transcribe(
+                    audio_stream,
+                    Duration::from_secs(1),
+                    whisper_tx,
+                    is_running,
+                    metrics,
+                    None,
+                )
+                .await
+            }
+        });
+
+        // Let the recorder subscribe and enter the suppressed branch (which
+        // sleeps in 1s increments).
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Movie audio buffers in the broadcast channel while suppressed.
+        for _ in 0..30 {
+            tx.send(vec![SENTINEL; chunk_samples])
+                .expect("send buffered movie chunk");
+        }
+
+        // Resume: the loop must drain the buffered movie audio, not replay it.
+        screenpipe_config::media::clear_manual_pause();
+
+        // Wait past the loop's 1s suppressed-branch sleep so it wakes, takes
+        // the resume path, and drains the buffered movie audio BEFORE any
+        // post-resume speech exists. (If we sent speech now it would be part of
+        // the drained backlog — an accepted loss, but it would make this test
+        // race.) 1.5s comfortably clears the 1s sleep + drain.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        // Post-resume speech: enough to fill more than one 1s segment. Sent in
+        // slices with small gaps so the recorder is already collecting when
+        // they arrive (not one giant pre-buffered burst).
+        for _ in 0..6 {
+            for _ in 0..60 {
+                tx.send(vec![SPEECH; chunk_samples])
+                    .expect("send post-resume speech chunk");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Collect every segment the recorder emits; none may contain SENTINEL.
+        let whisper_rx_assert = whisper_rx.clone();
+        let saw_speech = tokio::task::spawn_blocking(move || {
+            let mut saw_speech = false;
+            // Drain for a bounded window; movie audio must never appear.
+            while let Ok(segment) = whisper_rx_assert.recv_timeout(Duration::from_secs(2)) {
+                assert!(
+                    !segment.data.iter().any(|s| (*s - SENTINEL).abs() < 1e-6),
+                    "buffered movie audio leaked into a transcribed segment"
+                );
+                if segment.data.iter().any(|s| (*s - SPEECH).abs() < 1e-6) {
+                    saw_speech = true;
+                }
+            }
+            saw_speech
+        })
+        .await
+        .expect("assert receiver task");
+
+        assert!(
+            saw_speech,
+            "post-resume speech should still be transcribed after the drain"
+        );
+
+        is_running.store(false, Ordering::Relaxed);
+        tx.send(vec![SPEECH; chunk_samples]).ok();
+        let pipeline_result = tokio::time::timeout(Duration::from_secs(5), pipeline)
+            .await
+            .expect("pipeline shutdown timeout")
+            .expect("pipeline task");
+        pipeline_result.expect("pipeline result");
+
+        screenpipe_config::media::clear_manual_pause();
     }
 }
