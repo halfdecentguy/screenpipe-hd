@@ -636,8 +636,13 @@ mod tests {
     }
 
     // ── check_and_update_media_state ──────────────────────────────────
+    // Detection (setting DETECTED from the foreground app) is macOS-only —
+    // the non-macOS branch of check_and_update_media_state never sets it, so
+    // the two detection-path tests are gated to macOS. The manual-override
+    // tests below stay cross-platform, matching the function's behavior.
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn check_and_update_sets_flag_on_media() {
         let _l = lock();
         reset_enabled_clean();
@@ -655,6 +660,7 @@ mod tests {
     /// native Netflix-style app is focused — the DRM path only gates *screen*
     /// capture.
     #[test]
+    #[cfg(target_os = "macos")]
     fn check_and_update_sets_flag_on_native_drm_app() {
         let _l = lock();
         reset_enabled_clean();
