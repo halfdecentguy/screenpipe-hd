@@ -54,6 +54,7 @@ use crate::{
             delete_output_handler, get_output_handler, list_artifacts_unified_handler,
             list_outputs_handler, register_output_handler,
         },
+        recording::{pause_recording, resume_recording},
         retranscribe::retranscribe_meeting_handler,
         search::{keyword_search_handler, search},
         speakers::{
@@ -692,6 +693,10 @@ impl SCServer {
             .get("/experimental/validate/media", validate_media_handler)
             .post("/audio/start", start_audio)
             .post("/audio/stop", stop_audio)
+            // Unified pause/resume for the whole recorder (screen + audio +
+            // UI events) — the REST face of the tray's manual media pause.
+            .post("/recording/pause", pause_recording)
+            .post("/recording/resume", resume_recording)
             .get("/search/keyword", keyword_search_handler)
             .post("/audio/device/start", start_audio_device)
             .post("/audio/device/stop", stop_audio_device)

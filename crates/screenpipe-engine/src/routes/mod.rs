@@ -17,6 +17,7 @@ pub mod memories;
 pub mod outputs;
 pub mod pipe_store;
 pub mod power;
+pub mod recording;
 pub mod retranscribe;
 pub mod search;
 pub mod speakers;

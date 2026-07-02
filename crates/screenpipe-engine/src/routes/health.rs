@@ -130,6 +130,19 @@ pub struct HealthCheckResponse {
     /// True when recording is paused due to work-hours schedule.
     #[serde(default)]
     pub schedule_paused: bool,
+    /// True when media playback (auto-detect) or a manual pause is suppressing
+    /// screen + audio capture right now.
+    #[serde(default)]
+    pub media_capture_suppressed: bool,
+    /// True when a manual pause (tray companion / `POST /recording/pause`) is
+    /// active. `media_capture_suppressed && !media_manual_pause_active` means
+    /// the auto media-detect is what's suppressing.
+    #[serde(default)]
+    pub media_manual_pause_active: bool,
+    /// Epoch ms when the manual pause auto-expires. Null when no manual pause
+    /// is active or when paused "until I turn it off".
+    #[serde(default)]
+    pub media_manual_pause_until_ms: Option<i64>,
     /// Device hostname for remote monitoring
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
@@ -293,6 +306,9 @@ fn degraded_response() -> HealthCheckResponse {
         audio_db_write_stalled: false,
         drm_content_paused: false,
         schedule_paused: false,
+        media_capture_suppressed: false,
+        media_manual_pause_active: false,
+        media_manual_pause_until_ms: None,
         hostname: None,
         version: None,
     }
@@ -955,6 +971,9 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
         audio_db_write_stalled,
         drm_content_paused: crate::drm_detector::drm_content_paused(),
         schedule_paused: crate::schedule_monitor::schedule_paused(),
+        media_capture_suppressed: screenpipe_config::media::media_capture_suppressed(),
+        media_manual_pause_active: screenpipe_config::media::manual_active(),
+        media_manual_pause_until_ms: screenpipe_config::media::manual_pause_until_ms(),
         hostname: hostname::get().ok().and_then(|h| h.into_string().ok()),
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
     }
@@ -1086,6 +1105,9 @@ mod tests {
             audio_db_write_stalled: false,
             drm_content_paused: false,
             schedule_paused: false,
+            media_capture_suppressed: false,
+            media_manual_pause_active: false,
+            media_manual_pause_until_ms: None,
             hostname: None,
             version: None,
         }
@@ -1123,6 +1145,24 @@ mod tests {
             let cache = HEALTH_CACHE.read().await;
             assert!(now.saturating_sub(cache.0) >= HEALTH_CACHE_TTL_SECS);
         }
+    }
+
+    #[test]
+    fn media_pause_fields_serialize_explicitly() {
+        let mut resp = dummy_response("healthy");
+        resp.media_capture_suppressed = true;
+        resp.media_manual_pause_active = true;
+        resp.media_manual_pause_until_ms = None;
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["media_capture_suppressed"], true);
+        assert_eq!(json["media_manual_pause_active"], true);
+        // Null rather than absent for an until-turned-off pause — the tray
+        // companion distinguishes "no deadline" from "field missing".
+        assert!(json
+            .as_object()
+            .unwrap()
+            .contains_key("media_manual_pause_until_ms"));
+        assert!(json["media_manual_pause_until_ms"].is_null());
     }
 
     #[test]
