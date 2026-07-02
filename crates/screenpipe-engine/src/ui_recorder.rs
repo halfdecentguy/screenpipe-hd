@@ -584,6 +584,19 @@ pub async fn start_ui_recording(
 
             match handle.recv_timeout(recv_timeout) {
                 Some(event) => {
+                    // FULL manual pause: a tray/API "Pause" is explicit user
+                    // intent to stop *all* indexing, so drop UI events
+                    // (keystrokes, clipboard, app/window context) too — not
+                    // just frames and audio. The automatic movie-pause
+                    // (`media_capture_suppressed`) intentionally does NOT gate
+                    // this path; only the manual override does. Dropped before
+                    // trigger minting so no capture triggers fire either.
+                    // Pre-pause batched events still flush: `continue` re-runs
+                    // the recv loop, whose timeout tracks the flush deadline.
+                    if manual_pause_drops_ui_events() {
+                        continue;
+                    }
+
                     let db_event = event.to_db_insert(Some(session_id.clone()));
                     let app_lower = db_event
                         .app_name
@@ -785,6 +798,17 @@ pub async fn start_ui_recording(
 // Dead code below removed: TreeWalkerMetrics, run_tree_walker, constants.
 // Tree walker is disabled — paired_capture.rs handles accessibility capture.
 // Keeping this comment as a tombstone for git blame.
+
+/// Whether the ingest loop must drop incoming UI events because a manual
+/// recording pause is active (tray companion / `POST /recording/pause`).
+///
+/// Deliberately reads `manual_active()` and not `media_capture_suppressed()`:
+/// the auto movie-pause is a power feature that keeps UI-event indexing
+/// running, while a manual pause is a privacy action that must silence every
+/// pipeline (see issue #4).
+fn manual_pause_drops_ui_events() -> bool {
+    screenpipe_config::media::manual_active()
+}
 
 fn should_record_input_event(
     db_event: &InsertUiEvent,
@@ -1418,6 +1442,48 @@ mod scroll_burst_tests {
         let mut t = ScrollBurstTracker::new(Duration::from_millis(50));
         std::thread::sleep(Duration::from_millis(60));
         assert!(t.poll_burst_end().is_none());
+    }
+}
+
+#[cfg(test)]
+mod manual_pause_gate_tests {
+    use super::*;
+    use screenpipe_config::media;
+
+    /// Serializes with every other test mutating the process-global media/DRM
+    /// flags (see [`crate::drm_detector::test_flag_lock`]).
+    fn lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::drm_detector::test_flag_lock()
+    }
+
+    fn reset() {
+        media::set_pause_on_media_playback(false);
+        media::set_media_detected(false);
+        media::clear_manual_pause();
+    }
+
+    #[test]
+    fn manual_pause_gates_ui_events() {
+        let _l = lock();
+        reset();
+        assert!(!manual_pause_drops_ui_events());
+        media::start_manual_pause(None);
+        assert!(manual_pause_drops_ui_events());
+        media::clear_manual_pause();
+        assert!(!manual_pause_drops_ui_events());
+    }
+
+    #[test]
+    fn auto_media_detect_does_not_gate_ui_events() {
+        let _l = lock();
+        reset();
+        // The automatic movie-pause suppresses frames + audio but must keep
+        // UI-event indexing running — only the manual override is a full stop.
+        media::set_pause_on_media_playback(true);
+        media::set_media_detected(true);
+        assert!(media::media_capture_suppressed());
+        assert!(!manual_pause_drops_ui_events());
+        reset();
     }
 }
 

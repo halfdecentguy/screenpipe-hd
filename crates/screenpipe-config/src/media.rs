@@ -111,6 +111,19 @@ fn manual_active_at(now: i64) -> bool {
     until != 0 && now < until
 }
 
+/// Deadline of the active manual pause (epoch ms). `None` when no manual
+/// pause is active, when it has expired, or when paused "until I turn it
+/// off" (no deadline). Read by `/health` and `/recording/pause` so external
+/// surfaces (menu-bar companion) can show a resume countdown.
+pub fn manual_pause_until_ms() -> Option<i64> {
+    manual_pause_until_ms_at(now_ms())
+}
+
+fn manual_pause_until_ms_at(now: i64) -> Option<i64> {
+    let until = MANUAL_UNTIL_MS.load(Ordering::SeqCst);
+    (until != 0 && now < until && until != MANUAL_UNTIL_FOREVER).then_some(until)
+}
+
 /// Whether capture (screen + audio) should be suppressed right now because of
 /// media playback. The single predicate read by the vision gates and the
 /// monitor watcher: an auto-detect hit (`ENABLED && DETECTED`) **or** an
@@ -232,6 +245,26 @@ mod tests {
         set_pause_on_media_playback(true);
         set_pause_on_media_playback(false);
         assert!(!manual_active_at(T0), "toggling must not arm manual");
+    }
+
+    #[test]
+    fn manual_pause_until_ms_reports_timed_deadline_only() {
+        let _l = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        // Inactive → no deadline.
+        assert_eq!(manual_pause_until_ms_at(T0), None);
+        // Timed pause → the exact stored deadline, while still active.
+        start_manual_pause_at(T0, Some(Duration::from_millis((2 * MIN) as u64)));
+        assert_eq!(manual_pause_until_ms_at(T0), Some(T0 + 2 * MIN));
+        assert_eq!(manual_pause_until_ms_at(T0 + MIN), Some(T0 + 2 * MIN));
+        // Expired → None again, by clock alone.
+        assert_eq!(manual_pause_until_ms_at(T0 + 2 * MIN), None);
+        // "Until I turn it off" is active but has no deadline to report.
+        start_manual_pause_at(T0, None);
+        assert!(manual_active_at(T0));
+        assert_eq!(manual_pause_until_ms_at(T0), None);
+        clear_manual_pause();
+        assert_eq!(manual_pause_until_ms_at(T0), None);
     }
 
     #[test]
