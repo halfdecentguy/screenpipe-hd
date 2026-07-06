@@ -800,9 +800,27 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let present = audioStatuses.contains { $0.name == override }
         guard present else { return }
 
-        // Already running — the desired state. Reset the failure streak.
+        // Already running — reset the failure streak. But an override is an
+        // *exclusive* pick, and a lost start response (the control POST timing
+        // out while the engine still brings the device up — cold Bluetooth/
+        // virtual inputs can exceed the timeout) skips the stop-others step:
+        // the old input keeps recording alongside the override. Sweep such
+        // stragglers here, on the same cooldown as re-application.
         if audioStatuses.contains(where: { $0.name == override && $0.is_running }) {
             reconcileFailures = 0
+            let stragglers = audioStatuses.filter {
+                $0.is_running && isAudioInput($0.name) && $0.name != override
+            }
+            if !stragglers.isEmpty,
+                Date() >= lastReconcileAttempt.addingTimeInterval(Self.reconcileCooldown)
+            {
+                lastReconcileAttempt = Date()
+                NSLog(
+                    "screenpipe-tray: override %@ running but %d other input(s) still up — sweeping",
+                    override, stragglers.count)
+                // Re-selecting the override is a no-op start plus the stops.
+                applyAudioSelection(target: override)
+            }
             return
         }
 

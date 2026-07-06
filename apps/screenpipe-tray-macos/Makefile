@@ -23,7 +23,8 @@ install: $(BINARY)
 # Render the plist with the real paths and (re)load the launchd agent.
 install-agent: install
 	sed -e "s|__BINARY__|$(PREFIX)/bin/$(BINARY)|" \
-	    -e "s|__ENGINE_BIN__|$(ENGINE_BIN)|" $(LABEL).plist > $(AGENT_PLIST)
+	    -e "s|__ENGINE_BIN__|$(ENGINE_BIN)|" \
+	    -e "s|__HOME__|$(HOME)|" $(LABEL).plist > $(AGENT_PLIST)
 	-launchctl bootout gui/$$(id -u) $(AGENT_PLIST) 2>/dev/null
 	launchctl bootstrap gui/$$(id -u) $(AGENT_PLIST)
 
