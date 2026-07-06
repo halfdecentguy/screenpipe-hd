@@ -22,7 +22,7 @@ timed manual pause (from `media_manual_pause_until_ms`).
 
 ## What it controls
 
-- **Pause 15m / 1h / 2h / 4h / Until Turned Off** → `POST /recording/pause
+- **Pause 15m / 1h / 2h / 4h / Until Resumed** → `POST /recording/pause
   {"duration_secs": N}` (no duration = until resumed). This is the engine's
   manual media pause: it stops screen capture, audio transcription, **and**
   UI-event/clipboard indexing, forward-only, with wall-clock auto-expiry.

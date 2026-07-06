@@ -199,7 +199,7 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             ("Pause for 1 Hour", 60 * 60),
             ("Pause for 2 Hours", 2 * 60 * 60),
             ("Pause for 4 Hours", 4 * 60 * 60),
-            ("Pause Until Turned Off", nil),
+            ("Pause Until Resumed", nil),
         ]
         for (title, secs) in durations {
             let item = NSMenuItem(
@@ -250,7 +250,7 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if let until = h.media_manual_pause_until_ms {
                     return "Paused (\(remainingString(untilMs: until)))"
                 }
-                return "Paused Until Turned Off"
+                return "Paused Until Resumed"
             }
             if h.drm_content_paused == true { return "Paused — DRM Content" }
             if h.media_capture_suppressed == true { return "Paused — Media Playing" }
