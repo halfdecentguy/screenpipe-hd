@@ -208,6 +208,11 @@ func remainingString(untilMs: Int64) -> String {
 final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let flags: Flags
     let session: URLSession
+    /// Separate session for the audio-control POSTs: starting a Bluetooth HFP
+    /// input can legitimately take several seconds, so the 1.5s poll timeout
+    /// (tuned for /health) would abort the request mid-flight and make the
+    /// user's pick silently no-op.
+    let controlSession: URLSession
 
     var statusItem: NSStatusItem!
     var pollTimer: Timer?
@@ -259,6 +264,10 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         cfg.timeoutIntervalForRequest = 1.5
         cfg.timeoutIntervalForResource = 1.5
         self.session = URLSession(configuration: cfg)
+        let ctl = URLSessionConfiguration.ephemeral
+        ctl.timeoutIntervalForRequest = 10
+        ctl.timeoutIntervalForResource = 10
+        self.controlSession = URLSession(configuration: ctl)
         super.init()
     }
 
@@ -499,7 +508,7 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try? JSONSerialization.data(withJSONObject: body)
         }
-        let task = session.dataTask(with: req) { [weak self] data, response, error in
+        let task = controlSession.dataTask(with: req) { [weak self] data, response, error in
             guard let self else { return }
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             if error == nil, status == 401 || status == 403, retryOnAuthFailure {
@@ -547,32 +556,37 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: Audio input
 
     /// GET /audio/list (auth required) → rebuild the submenu rows. Runs off main
-    /// for the possible auth-key shell-out; result applied on main.
-    func fetchAudioDevices() {
+    /// for the possible auth-key shell-out; result applied on main. The optional
+    /// `completion` runs on the main queue once the fetch settles — after
+    /// `audioDevices` was updated on success, or with it untouched on failure —
+    /// so callers can retry a default-input resolution against fresh data.
+    func fetchAudioDevices(completion: (() -> Void)? = nil) {
+        func settle() { if let completion { DispatchQueue.main.async { completion() } } }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
+            guard let self else { return settle() }
             var req = URLRequest(url: apiURL("/audio/list"))
             if let key = apiKey(forceRefetch: false) {
                 req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
             }
             let task = session.dataTask(with: req) { [weak self] data, response, error in
-                guard let self else { return }
+                guard let self else { return settle() }
                 let status = (response as? HTTPURLResponse)?.statusCode ?? 0
                 if error == nil, status == 401 || status == 403 {
                     // Same key-rotation handling as authedPOST, but GET-shaped:
                     // drop the cache and refetch once via a fresh URLRequest.
                     DispatchQueue.global(qos: .userInitiated).async {
                         _ = self.apiKey(forceRefetch: true)
-                        self.refetchAudioDevices()
+                        self.refetchAudioDevices(completion: completion)
                     }
                     return
                 }
                 guard error == nil, status == 200, let data,
                     let devices = try? JSONDecoder().decode([AudioDevice].self, from: data)
-                else { return }
+                else { return settle() }
                 DispatchQueue.main.async {
                     self.audioDevices = devices
                     self.rebuildAudioMenu()
+                    completion?()
                 }
             }
             task.resume()
@@ -580,20 +594,22 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// Single retry after a forced key refetch (already off main, key refreshed).
-    private func refetchAudioDevices() {
+    private func refetchAudioDevices(completion: (() -> Void)? = nil) {
+        func settle() { if let completion { DispatchQueue.main.async { completion() } } }
         var req = URLRequest(url: apiURL("/audio/list"))
         if let key = apiKey(forceRefetch: false) {
             req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         }
         let task = session.dataTask(with: req) { [weak self] data, response, _ in
-            guard let self else { return }
+            guard let self else { return settle() }
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             guard status == 200, let data,
                 let devices = try? JSONDecoder().decode([AudioDevice].self, from: data)
-            else { return }
+            else { return settle() }
             DispatchQueue.main.async {
                 self.audioDevices = devices
                 self.rebuildAudioMenu()
+                completion?()
             }
         }
         task.resume()
@@ -618,17 +634,38 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         task.resume()
     }
 
+    /// Everything the audio submenu renders from. Rebuilding an open NSMenu
+    /// (removeAllItems) drops the row the user is hovering, and the 2s poll
+    /// plus every status fetch call rebuildAudioMenu — so we diff against the
+    /// last-rendered snapshot and skip the rebuild when nothing changed.
+    private struct AudioMenuSnapshot: Equatable {
+        var override: String?
+        var engineDown: Bool
+        var inputs: [String]
+        var runningInputs: Set<String>
+    }
+    private var lastAudioMenuSnapshot: AudioMenuSnapshot?
+
     /// Rebuild the submenu in place from the last /audio/list + /device/status.
     /// "System Default" first, then one row per input device. Checkmarks: an
     /// input row is checked when status reports it running; "System Default" is
-    /// checked when no override is stored. Main queue only.
+    /// checked when no override is stored. No-op when the rendered state is
+    /// unchanged (see AudioMenuSnapshot). Main queue only.
     func rebuildAudioMenu() {
         guard let audioMenu else { return }
-        audioMenu.removeAllItems()
 
         let override = AudioOverride.deviceName
         let runningInputs = Set(
             audioStatuses.filter { $0.is_running && isAudioInput($0.name) }.map { $0.name })
+        let snapshot = AudioMenuSnapshot(
+            override: override,
+            engineDown: engineDown,
+            inputs: audioDevices.map { $0.name }.filter(isAudioInput).sorted(),
+            runningInputs: runningInputs)
+        guard snapshot != lastAudioMenuSnapshot else { return }
+        lastAudioMenuSnapshot = snapshot
+
+        audioMenu.removeAllItems()
 
         let systemDefault = NSMenuItem(
             title: "System Default", action: #selector(selectSystemDefaultAudio),
@@ -638,7 +675,7 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         systemDefault.isEnabled = !engineDown
         audioMenu.addItem(systemDefault)
 
-        let inputs = audioDevices.map { $0.name }.filter(isAudioInput).sorted()
+        let inputs = snapshot.inputs
         if inputs.isEmpty {
             let placeholder = NSMenuItem(
                 title: engineDown ? "Engine Down" : "No Input Devices", action: nil,
@@ -674,19 +711,39 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         AudioOverride.deviceName = nil
         reconcileFailures = 0
         // "System Default" = start whatever /audio/list reports as the default
-        // input; if we can't see one yet, still stop non-defaults so state
-        // doesn't drift. Absent a known default we pass nil (start nothing).
-        let defaultInput = audioDevices.first { isAudioInput($0.name) && $0.is_default }?.name
-        applyAudioSelection(target: defaultInput)
+        // input. The cached list can be empty or stale (first menu open racing
+        // the auth shell-out; /audio/list 500s transiently during a Bluetooth
+        // default flip), so when no default resolves, refetch once and retry —
+        // and if it still doesn't, leave devices untouched. Never stop the
+        // running inputs with nothing to start in their place: the override is
+        // already cleared, so nothing would ever bring audio back.
+        if let defaultInput = defaultInputName() {
+            applyAudioSelection(target: defaultInput)
+            return
+        }
+        fetchAudioDevices { [weak self] in
+            guard let self else { return }
+            guard let defaultInput = self.defaultInputName() else {
+                NSLog(
+                    "screenpipe-tray: System Default picked but no default input known — leaving devices untouched")
+                return
+            }
+            self.applyAudioSelection(target: defaultInput)
+        }
+    }
+
+    /// The `is_default` input from the last /audio/list, if any. Main queue.
+    func defaultInputName() -> String? {
+        audioDevices.first { isAudioInput($0.name) && $0.is_default }?.name
     }
 
     /// Core start-before-stop: POST /audio/device/start for `target` first (no
     /// capture gap), then /audio/device/stop for every OTHER input currently
-    /// running. Called on the main queue; the POSTs run off it via authedPOST.
-    /// When `target` is nil (unknown default) we skip the start and only stop
-    /// strays. `onResult` reports whether the start POST succeeded, for the
+    /// running — and only if the start succeeded, so we can never end up with
+    /// every input stopped. Called on the main queue; the POSTs run off it via
+    /// authedPOST. `onResult` reports whether the start POST succeeded, for the
     /// reconciliation failure counter.
-    func applyAudioSelection(target: String?, onResult: ((Bool) -> Void)? = nil) {
+    func applyAudioSelection(target: String, onResult: ((Bool) -> Void)? = nil) {
         let others = audioStatuses
             .filter { $0.is_running && isAudioInput($0.name) && $0.name != target }
             .map { $0.name }
@@ -705,12 +762,6 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     }
                 }
             }
-        }
-
-        guard let target else {
-            stopOthers()
-            onResult?(true)
-            return
         }
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
