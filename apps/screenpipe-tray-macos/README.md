@@ -21,6 +21,10 @@ SF-Symbol icon:
 The first menu line spells out the state, including the resume countdown for a
 timed manual pause (from `media_manual_pause_until_ms`).
 
+Alongside `/health` it polls `GET /audio/device/status` (auth-exempt, cheap) on
+the same 2 s cadence — this drives the Audio Input checkmarks and, with the menu
+closed, the audio-override reconciliation described below.
+
 ## What it controls
 
 - **Pause 15m / 1h / 2h / 4h / Until Resumed** → `POST /recording/pause
@@ -30,6 +34,21 @@ timed manual pause (from `media_manual_pause_until_ms`).
 - **Resume Recording** → `POST /recording/resume`. Only enabled while a manual
   pause is active — it does not (and cannot) override the DRM/schedule/media
   auto-pauses.
+- **Audio Input** submenu → pick which input device the engine records from.
+  Lists `System Default` plus every `(input)` device from `GET /audio/list`; the
+  running one (per `GET /audio/device/status`) is checked. Picking a device
+  `POST /audio/device/start`s it, then stops the others (start-before-stop, no
+  capture gap). Motivation: when Bluetooth headphones connect, macOS flips the
+  default input to their low-quality HFP mic and the engine follows — this is
+  the manual override (force "MacBook Pro Microphone", say).
+
+  The engine only mutates in-memory state and reverts to the system default on
+  restart, so the tray owns persistence: the override is stored in
+  `UserDefaults` and **re-applied automatically** when the status poll sees it
+  present-but-not-running (the typical after-restart state). Reconciliation is
+  rate-limited (≤1 attempt / 30 s), gives up after 3 consecutive failures until
+  the engine bounces, and does nothing while the override device is absent
+  (headphones unplugged) — keeping the override for when it returns.
 - **Restart Engine** → `launchctl kickstart -k gui/$UID/<label>`. Disabled
   while the engine is *stopped* (kickstart has nothing to kick on an unloaded
   job — use Start Engine instead).
@@ -82,8 +101,9 @@ engine's plist lives elsewhere.
 
 ## Auth
 
-The engine ships with `api_auth: true` — `/health` is exempt (status always
-works) but `/recording/*` requires a Bearer token. The tray resolves the key
+The engine ships with `api_auth: true` — `/health` and `/audio/device/status`
+are exempt (status always works) but `/recording/*`, `GET /audio/list`, and
+`POST /audio/device/{start,stop}` require a Bearer token. The tray resolves the key
 the same way the engine's own CLI does, in priority order:
 
 1. `SCREENPIPE_API_KEY` env var, if set;
@@ -107,4 +127,11 @@ built-from-source binary — the plist template carries an absolute path.
        -H 'content-type: application/json' -d '{"duration_secs":900}' \
        localhost:3030/recording/pause                                            # 15 min
   curl -X POST -H "authorization: Bearer $TOKEN" localhost:3030/recording/resume
+
+  curl -H "authorization: Bearer $TOKEN" localhost:3030/audio/list           # devices
+  curl localhost:3030/audio/device/status                                    # running (no auth)
+  curl -X POST -H "authorization: Bearer $TOKEN" \
+       -H 'content-type: application/json' \
+       -d '{"device_name":"MacBook Pro Microphone (input)"}' \
+       localhost:3030/audio/device/start                                     # force input
   ```

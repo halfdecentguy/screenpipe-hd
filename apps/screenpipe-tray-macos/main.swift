@@ -112,6 +112,53 @@ struct RecordingControl: Decodable {
     var media_capture_suppressed: Bool?
 }
 
+/// One entry of GET /audio/list. `name` is canonical — "<device> (input)" or
+/// "<device> (output)"; we only ever surface / touch the "(input)" ones.
+struct AudioDevice: Decodable {
+    var name: String
+    var is_default: Bool
+}
+
+/// One entry of GET /audio/device/status (auth-exempt, cheap to poll). Drives
+/// the submenu checkmarks and the override reconciliation.
+struct AudioDeviceStatus: Decodable {
+    var name: String
+    var is_running: Bool
+    var is_user_disabled: Bool
+}
+
+/// Canonical input names end in this suffix — the one thing that distinguishes
+/// an input from an output in the flat /audio/list namespace.
+let audioInputSuffix = " (input)"
+
+func isAudioInput(_ name: String) -> Bool { name.hasSuffix(audioInputSuffix) }
+
+/// Strip the " (input)" suffix for display; the menu row is a device name, not
+/// an engine-canonical string.
+func audioInputDisplayName(_ name: String) -> String {
+    guard name.hasSuffix(audioInputSuffix) else { return name }
+    return String(name.dropLast(audioInputSuffix.count))
+}
+
+// MARK: - Audio-input override persistence
+// The engine only mutates in-memory device state and reverts to the system
+// default input on restart (its launchd plist passes no --audio-device). So the
+// tray, not the engine, owns "which input the user forced" — persisted here and
+// re-applied by the reconciliation poll. UserDefaults on an unbundled binary
+// keys under the executable name, which is stable for this launchd agent.
+
+enum AudioOverride {
+    static let key = "audioInputOverride"
+
+    static var deviceName: String? {
+        get { UserDefaults.standard.string(forKey: key) }
+        set {
+            if let newValue { UserDefaults.standard.set(newValue, forKey: key) }
+            else { UserDefaults.standard.removeObject(forKey: key) }
+        }
+    }
+}
+
 // MARK: - State machine
 
 enum TrayState {
@@ -189,6 +236,23 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var restartItem: NSMenuItem!
     var engineToggleItem: NSMenuItem!
 
+    // Audio-input submenu. The submenu is rebuilt in place when a fresh
+    // /audio/list lands; `audioDevices` / `audioStatuses` are the last responses
+    // seen, both mutated on the main queue only.
+    var audioMenuItem: NSMenuItem!
+    var audioMenu: NSMenu!
+    var audioDevices: [AudioDevice] = []
+    var audioStatuses: [AudioDeviceStatus] = []
+
+    // Reconciliation guard rails (all main-queue). After an engine restart the
+    // override device comes back present-but-not-running; we re-apply it, but at
+    // most once per cooldown and give up after a run of failures until the
+    // engine bounces (down→up resets the failure counter).
+    var lastReconcileAttempt = Date.distantPast
+    var reconcileFailures = 0
+    static let reconcileCooldown: TimeInterval = 30
+    static let reconcileMaxFailures = 3
+
     init(flags: Flags) {
         self.flags = flags
         let cfg = URLSessionConfiguration.ephemeral
@@ -255,6 +319,14 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(resumeItem)
         menu.addItem(.separator())
 
+        audioMenu = NSMenu()
+        audioMenu.autoenablesItems = false
+        audioMenuItem = NSMenuItem(title: "Audio Input", action: nil, keyEquivalent: "")
+        audioMenuItem.submenu = audioMenu
+        menu.addItem(audioMenuItem)
+        rebuildAudioMenu()
+        menu.addItem(.separator())
+
         restartItem = NSMenuItem(
             title: "Restart Engine", action: #selector(restartEngine), keyEquivalent: "")
         restartItem.target = self
@@ -276,10 +348,17 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return menu
     }
 
-    func menuWillOpen(_: NSMenu) {
+    func menuWillOpen(_ menu: NSMenu) {
+        // The submenu opening on its own doesn't need the parent refresh; only
+        // act on the top-level menu (the submenu shares this delegate).
+        guard menu === statusItem.menu else { return }
         // Fresh countdown + a poll so the status line is current, not ≤2s old.
         updateMenuItems()
         poll()
+        // The submenu rows populate as these land; both are async and update in
+        // place. Status is auth-free; list needs the bearer token.
+        fetchAudioDevices()
+        fetchAudioStatus()
     }
 
     func statusText() -> String {
@@ -318,6 +397,9 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // nothing to kick; only Start Engine (bootstrap) can bring it back.
         restartItem.isEnabled = state != .stopped
         engineToggleItem.title = state == .stopped ? "Start Engine" : "Stop Engine"
+        audioMenuItem?.isEnabled = !engineDown
+        // Re-render checkmarks / enabled state from whatever we last polled.
+        rebuildAudioMenu()
     }
 
     func applyState() {
@@ -368,10 +450,18 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     // A live /health means the job is loaded — no probe needed.
                     self.jobLoaded = true
                 }
+                // A fresh engine (down→up) has reverted to its default input, so
+                // the override-reconcile failure streak from the *previous* run
+                // no longer applies — give the new instance a clean slate.
+                if wasDown && !self.engineDown { self.reconcileFailures = 0 }
                 self.applyState()
             }
         }
         task.resume()
+        // Piggyback the audio-status poll on the same cadence: it's auth-free
+        // and cheap, and it's what drives override reconciliation with the menu
+        // closed.
+        fetchAudioStatus()
     }
 
     @objc func pauseAction(_ sender: NSMenuItem) {
@@ -391,9 +481,15 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// Runs on a background queue. `retryOnAuthFailure` handles key rotation:
-    /// a 401/403 drops the cached key, re-resolves it, and retries once.
-    func sendControl(path: String, body: [String: Any]?, retryOnAuthFailure: Bool) {
+    /// Bearer-authed POST with one-shot key-rotation retry, shared by the
+    /// recording-pause and audio-device paths. Runs on a background queue; the
+    /// completion (also background) gets the HTTP status, body, and transport
+    /// error. On a 401/403 it drops the cached key, re-resolves it, and retries
+    /// once (retry sets `retryOnAuthFailure: false` so it can't loop).
+    func authedPOST(
+        path: String, body: [String: Any]?, retryOnAuthFailure: Bool,
+        completion: @escaping (_ status: Int, _ data: Data?, _ error: Error?) -> Void
+    ) {
         var req = URLRequest(url: apiURL(path))
         req.httpMethod = "POST"
         if let key = apiKey(forceRefetch: false) {
@@ -409,10 +505,22 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if error == nil, status == 401 || status == 403, retryOnAuthFailure {
                 DispatchQueue.global(qos: .userInitiated).async {
                     _ = self.apiKey(forceRefetch: true)
-                    self.sendControl(path: path, body: body, retryOnAuthFailure: false)
+                    self.authedPOST(
+                        path: path, body: body, retryOnAuthFailure: false, completion: completion)
                 }
                 return
             }
+            completion(status, data, error)
+        }
+        task.resume()
+    }
+
+    /// Runs on a background queue. Recording pause/resume: POST, then fold the
+    /// authoritative control response into local state so the icon flips now.
+    func sendControl(path: String, body: [String: Any]?, retryOnAuthFailure: Bool) {
+        authedPOST(path: path, body: body, retryOnAuthFailure: retryOnAuthFailure) {
+            [weak self] status, data, error in
+            guard let self else { return }
             var control: RecordingControl?
             if error == nil, status == 200, let data {
                 control = try? JSONDecoder().decode(RecordingControl.self, from: data)
@@ -434,7 +542,235 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             }
         }
+    }
+
+    // MARK: Audio input
+
+    /// GET /audio/list (auth required) → rebuild the submenu rows. Runs off main
+    /// for the possible auth-key shell-out; result applied on main.
+    func fetchAudioDevices() {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            var req = URLRequest(url: apiURL("/audio/list"))
+            if let key = apiKey(forceRefetch: false) {
+                req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            }
+            let task = session.dataTask(with: req) { [weak self] data, response, error in
+                guard let self else { return }
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                if error == nil, status == 401 || status == 403 {
+                    // Same key-rotation handling as authedPOST, but GET-shaped:
+                    // drop the cache and refetch once via a fresh URLRequest.
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        _ = self.apiKey(forceRefetch: true)
+                        self.refetchAudioDevices()
+                    }
+                    return
+                }
+                guard error == nil, status == 200, let data,
+                    let devices = try? JSONDecoder().decode([AudioDevice].self, from: data)
+                else { return }
+                DispatchQueue.main.async {
+                    self.audioDevices = devices
+                    self.rebuildAudioMenu()
+                }
+            }
+            task.resume()
+        }
+    }
+
+    /// Single retry after a forced key refetch (already off main, key refreshed).
+    private func refetchAudioDevices() {
+        var req = URLRequest(url: apiURL("/audio/list"))
+        if let key = apiKey(forceRefetch: false) {
+            req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        }
+        let task = session.dataTask(with: req) { [weak self] data, response, _ in
+            guard let self else { return }
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard status == 200, let data,
+                let devices = try? JSONDecoder().decode([AudioDevice].self, from: data)
+            else { return }
+            DispatchQueue.main.async {
+                self.audioDevices = devices
+                self.rebuildAudioMenu()
+            }
+        }
         task.resume()
+    }
+
+    /// GET /audio/device/status — auth-EXEMPT, so no bearer token and no
+    /// shell-out. Drives checkmarks and, crucially, override reconciliation.
+    func fetchAudioStatus() {
+        let task = session.dataTask(with: apiURL("/audio/device/status")) {
+            [weak self] data, response, error in
+            guard let self else { return }
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard error == nil, status == 200, let data,
+                let statuses = try? JSONDecoder().decode([AudioDeviceStatus].self, from: data)
+            else { return }
+            DispatchQueue.main.async {
+                self.audioStatuses = statuses
+                self.rebuildAudioMenu()
+                self.reconcileAudioOverride()
+            }
+        }
+        task.resume()
+    }
+
+    /// Rebuild the submenu in place from the last /audio/list + /device/status.
+    /// "System Default" first, then one row per input device. Checkmarks: an
+    /// input row is checked when status reports it running; "System Default" is
+    /// checked when no override is stored. Main queue only.
+    func rebuildAudioMenu() {
+        guard let audioMenu else { return }
+        audioMenu.removeAllItems()
+
+        let override = AudioOverride.deviceName
+        let runningInputs = Set(
+            audioStatuses.filter { $0.is_running && isAudioInput($0.name) }.map { $0.name })
+
+        let systemDefault = NSMenuItem(
+            title: "System Default", action: #selector(selectSystemDefaultAudio),
+            keyEquivalent: "")
+        systemDefault.target = self
+        systemDefault.state = (override == nil) ? .on : .off
+        systemDefault.isEnabled = !engineDown
+        audioMenu.addItem(systemDefault)
+
+        let inputs = audioDevices.map { $0.name }.filter(isAudioInput).sorted()
+        if inputs.isEmpty {
+            let placeholder = NSMenuItem(
+                title: engineDown ? "Engine Down" : "No Input Devices", action: nil,
+                keyEquivalent: "")
+            placeholder.isEnabled = false
+            audioMenu.addItem(placeholder)
+            return
+        }
+
+        audioMenu.addItem(.separator())
+        for name in inputs {
+            let item = NSMenuItem(
+                title: audioInputDisplayName(name), action: #selector(selectAudioInput(_:)),
+                keyEquivalent: "")
+            item.target = self
+            item.representedObject = name
+            item.state = runningInputs.contains(name) ? .on : .off
+            item.isEnabled = !engineDown
+            audioMenu.addItem(item)
+        }
+    }
+
+    @objc func selectAudioInput(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        AudioOverride.deviceName = name
+        // A fresh manual pick means the failure streak is irrelevant — let
+        // reconciliation try again from clean.
+        reconcileFailures = 0
+        applyAudioSelection(target: name)
+    }
+
+    @objc func selectSystemDefaultAudio() {
+        AudioOverride.deviceName = nil
+        reconcileFailures = 0
+        // "System Default" = start whatever /audio/list reports as the default
+        // input; if we can't see one yet, still stop non-defaults so state
+        // doesn't drift. Absent a known default we pass nil (start nothing).
+        let defaultInput = audioDevices.first { isAudioInput($0.name) && $0.is_default }?.name
+        applyAudioSelection(target: defaultInput)
+    }
+
+    /// Core start-before-stop: POST /audio/device/start for `target` first (no
+    /// capture gap), then /audio/device/stop for every OTHER input currently
+    /// running. Called on the main queue; the POSTs run off it via authedPOST.
+    /// When `target` is nil (unknown default) we skip the start and only stop
+    /// strays. `onResult` reports whether the start POST succeeded, for the
+    /// reconciliation failure counter.
+    func applyAudioSelection(target: String?, onResult: ((Bool) -> Void)? = nil) {
+        let others = audioStatuses
+            .filter { $0.is_running && isAudioInput($0.name) && $0.name != target }
+            .map { $0.name }
+
+        func stopOthers() {
+            for name in others {
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    self?.authedPOST(
+                        path: "/audio/device/stop", body: ["device_name": name],
+                        retryOnAuthFailure: true
+                    ) { status, _, _ in
+                        if status != 200 {
+                            NSLog(
+                                "screenpipe-tray: audio stop %@ failed (http %d)", name, status)
+                        }
+                    }
+                }
+            }
+        }
+
+        guard let target else {
+            stopOthers()
+            onResult?(true)
+            return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.authedPOST(
+                path: "/audio/device/start", body: ["device_name": target],
+                retryOnAuthFailure: true
+            ) { [weak self] status, _, _ in
+                let ok = status == 200
+                if !ok {
+                    NSLog("screenpipe-tray: audio start %@ failed (http %d)", target, status)
+                }
+                DispatchQueue.main.async {
+                    // Only stop the others once the replacement is actually up —
+                    // a failed start must not leave us with nothing recording.
+                    if ok { stopOthers() }
+                    self?.fetchAudioStatus()
+                    onResult?(ok)
+                }
+            }
+        }
+    }
+
+    /// The point of the feature: after an engine restart it reverts to the
+    /// system-default input, so a stored override shows up present-but-not-
+    /// running in the status poll. Re-apply it — but at most once per cooldown,
+    /// and stop after a run of failures until the engine bounces. Main queue.
+    func reconcileAudioOverride() {
+        guard let override = AudioOverride.deviceName else { return }
+        // Nothing to do while the engine is down; the down→up transition in
+        // poll() resets the failure counter so a bounce gets a clean slate.
+        guard !engineDown else { return }
+        guard reconcileFailures < Self.reconcileMaxFailures else { return }
+
+        // Override device gone (headphones unplugged): keep the override for
+        // its return, but don't churn.
+        let present = audioStatuses.contains { $0.name == override }
+        guard present else { return }
+
+        // Already running — the desired state. Reset the failure streak.
+        if audioStatuses.contains(where: { $0.name == override && $0.is_running }) {
+            reconcileFailures = 0
+            return
+        }
+
+        guard Date() >= lastReconcileAttempt.addingTimeInterval(Self.reconcileCooldown) else {
+            return
+        }
+        lastReconcileAttempt = Date()
+        NSLog("screenpipe-tray: reconciling audio override → %@", override)
+        applyAudioSelection(target: override) { [weak self] ok in
+            guard let self else { return }
+            if ok {
+                reconcileFailures = 0
+            } else {
+                reconcileFailures += 1
+                NSLog(
+                    "screenpipe-tray: audio override reconcile failed (%d/%d)",
+                    reconcileFailures, Self.reconcileMaxFailures)
+            }
+        }
     }
 
     // MARK: API auth key
