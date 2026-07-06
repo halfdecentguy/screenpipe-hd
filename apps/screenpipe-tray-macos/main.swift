@@ -21,6 +21,17 @@ struct Flags {
     var port = 3030
     var launchdLabel = "com.bogdan.screenpipe"
     var engineBin = "screenpipe"
+    /// Explicitly overridden with --engine-plist; otherwise derived from
+    /// launchdLabel once parsing is done (so --launchd-label given afterwards
+    /// still feeds the default). nil ⇒ use the derived default.
+    private var enginePlistOverride: String?
+
+    /// Path Start Engine bootstraps. Defaults to the LaunchAgents plist named
+    /// after the engine label — the standard install location.
+    var enginePlist: String {
+        enginePlistOverride
+            ?? "\(NSHomeDirectory())/Library/LaunchAgents/\(launchdLabel).plist"
+    }
 
     static func parse(_ args: [String]) -> Flags {
         var flags = Flags()
@@ -42,17 +53,26 @@ struct Flags {
                     fail("--engine-bin expects a path or command name")
                 }
                 flags.engineBin = v
+            case "--engine-plist":
+                guard let v = it.next(), !v.isEmpty else {
+                    fail("--engine-plist expects a path")
+                }
+                flags.enginePlistOverride = v
             case "-h", "--help":
                 print(
                     """
-                    usage: screenpipe-tray [--port N] [--launchd-label LABEL] [--engine-bin PATH]
+                    usage: screenpipe-tray [--port N] [--launchd-label LABEL] \
+                    [--engine-bin PATH] [--engine-plist PATH]
 
                       --port           engine API port (default 3030)
                       --launchd-label  launchd agent label used by Restart Engine
+                                       and the engine kill switch
                                        (default com.bogdan.screenpipe)
                       --engine-bin     screenpipe binary used to fetch the API auth
                                        key via `auth token` (default: `screenpipe`
                                        from PATH). SCREENPIPE_API_KEY env overrides.
+                      --engine-plist   launchd plist Start Engine bootstraps
+                                       (default ~/Library/LaunchAgents/<label>.plist)
                     """)
                 exit(0)
             default:
@@ -95,7 +115,8 @@ struct RecordingControl: Decodable {
 // MARK: - State machine
 
 enum TrayState {
-    case down       // /health unreachable — crash, memwatch kill, not installed
+    case down       // /health unreachable but job loaded — crash, memwatch kill
+    case stopped    // /health unreachable AND job unloaded — user killed the engine
     case stalled    // capture alive but DB writes not landing
     case paused     // manual pause, media auto-detect, DRM, or schedule
     case recording
@@ -103,6 +124,7 @@ enum TrayState {
     var symbolName: String {
         switch self {
         case .down: return "slash.circle"
+        case .stopped: return "stop.circle"
         case .stalled: return "exclamationmark.circle"
         case .paused: return "pause.circle"
         case .recording: return "record.circle"
@@ -110,8 +132,12 @@ enum TrayState {
     }
 }
 
-func trayState(engineDown: Bool, health: Health?) -> TrayState {
-    guard !engineDown, let h = health else { return .down }
+/// `jobLoaded` disambiguates unreachable: a loaded-but-unreachable engine
+/// crashed or was memwatch-killed (.down, launchd may resurrect it), whereas an
+/// unloaded one was deliberately turned off (.stopped). When /health answers,
+/// the job is trivially loaded so the flag is irrelevant.
+func trayState(engineDown: Bool, health: Health?, jobLoaded: Bool) -> TrayState {
+    guard !engineDown, let h = health else { return jobLoaded ? .down : .stopped }
     if h.audio_db_write_stalled == true || h.vision_db_write_stalled == true {
         return .stalled
     }
@@ -143,6 +169,14 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // Mutated on the main queue only.
     var health: Health?
     var engineDown = true
+    /// Whether the engine's launchd job is loaded. Only meaningful while the
+    /// engine is unreachable — it splits .down (crashed, still loaded) from
+    /// .stopped (user killed it, unloaded). Probed via `launchctl print`, never
+    /// on the happy path (a live /health means the job is trivially loaded).
+    var jobLoaded = true
+    /// Throttle for the loaded-state probe so a long outage can't spawn a
+    /// launchctl per poll — at most one every 10s while unreachable.
+    var lastLoadedProbe = Date.distantPast
     var state: TrayState = .down
     /// After a pause/resume action we already know the truth from the control
     /// response; ignore polls briefly so the server's 1s-cached /health can't
@@ -152,6 +186,8 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusLineItem: NSMenuItem!
     var resumeItem: NSMenuItem!
     var pauseItems: [NSMenuItem] = []
+    var restartItem: NSMenuItem!
+    var engineToggleItem: NSMenuItem!
 
     init(flags: Flags) {
         self.flags = flags
@@ -179,6 +215,9 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // tracking runs the run loop in a non-default mode).
         RunLoop.main.add(timer, forMode: .common)
         pollTimer = timer
+        // Prime jobLoaded so the very first frame can tell .stopped from .down
+        // before /health has had a chance to answer.
+        probeJobLoaded()
         poll()
     }
 
@@ -216,10 +255,17 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(resumeItem)
         menu.addItem(.separator())
 
-        let restart = NSMenuItem(
+        restartItem = NSMenuItem(
             title: "Restart Engine", action: #selector(restartEngine), keyEquivalent: "")
-        restart.target = self
-        menu.addItem(restart)
+        restartItem.target = self
+        menu.addItem(restartItem)
+
+        // Kill switch: bootout unloads the job so KeepAlive can't resurrect it;
+        // title flips to Start Engine (bootstrap) once unloaded. See toggleEngine.
+        engineToggleItem = NSMenuItem(
+            title: "Stop Engine", action: #selector(toggleEngine), keyEquivalent: "")
+        engineToggleItem.target = self
+        menu.addItem(engineToggleItem)
         menu.addItem(.separator())
 
         menu.addItem(
@@ -240,6 +286,8 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switch state {
         case .down:
             return "Engine Down"
+        case .stopped:
+            return "Engine Stopped"
         case .stalled:
             return "Stalled — DB Writes Not Landing"
         case .recording:
@@ -266,10 +314,14 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // pause came from DRM / auto-detect / schedule so clicking it can't
         // silently no-op.
         resumeItem.isEnabled = !engineDown && health?.media_manual_pause_active == true
+        // While stopped the job is unloaded, so kickstart (Restart Engine) has
+        // nothing to kick; only Start Engine (bootstrap) can bring it back.
+        restartItem.isEnabled = state != .stopped
+        engineToggleItem.title = state == .stopped ? "Start Engine" : "Stop Engine"
     }
 
     func applyState() {
-        let newState = trayState(engineDown: engineDown, health: health)
+        let newState = trayState(engineDown: engineDown, health: health, jobLoaded: jobLoaded)
         if newState.symbolName != state.symbolName {
             NSLog("screenpipe-tray: %@ → %@", String(describing: state), String(describing: newState))
         }
@@ -304,6 +356,17 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.engineDown = (health == nil)
                 if Date() >= self.ignorePollsUntil || wasDown != self.engineDown {
                     self.health = health
+                }
+                if self.engineDown {
+                    // Unreachable: figure out if we're .down or .stopped, but
+                    // throttle the shell-out so a long outage doesn't fork a
+                    // launchctl every 2s.
+                    if Date().timeIntervalSince(self.lastLoadedProbe) >= 10 {
+                        self.probeJobLoaded()
+                    }
+                } else {
+                    // A live /health means the job is loaded — no probe needed.
+                    self.jobLoaded = true
                 }
                 self.applyState()
             }
@@ -439,6 +502,87 @@ final class TrayDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             } catch {
                 NSLog("screenpipe-tray: failed to run launchctl: %@", "\(error)")
+            }
+        }
+    }
+
+    // MARK: Engine kill switch
+
+    /// Stop Engine ⇒ bootout (unload the job so KeepAlive can't resurrect it);
+    /// Start Engine ⇒ bootstrap (RunAtLoad starts it immediately). Decided off
+    /// the current icon: .stopped means unloaded, anything else means loaded.
+    @objc func toggleEngine() {
+        let starting = (state == .stopped)
+        let label = flags.launchdLabel
+        let plist = flags.enginePlist
+        let uid = getuid()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let loaded: Bool
+            if starting {
+                // bootstrap: RunAtLoad=true starts the engine right away.
+                Self.runLaunchctl(["bootstrap", "gui/\(uid)", plist])
+                loaded = true
+            } else {
+                // bootout unloads the job. A non-zero exit when it's already
+                // unloaded is fine — the desired end state (unloaded) holds.
+                Self.runLaunchctl(["bootout", "gui/\(uid)/\(label)"])
+                loaded = false
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                // Reflect the new loaded state immediately. After a start we
+                // stay .down (health still unreachable) for a few seconds until
+                // the engine binds :3030 — the poll then flips us to .recording.
+                self.jobLoaded = loaded
+                self.lastLoadedProbe = Date()
+                self.applyState()
+                self.poll()
+            }
+        }
+    }
+
+    static func runLaunchctl(_ args: [String]) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        p.arguments = args
+        do {
+            try p.run()
+            p.waitUntilExit()
+            if p.terminationStatus != 0 {
+                NSLog(
+                    "screenpipe-tray: launchctl %@ exited %d",
+                    args.joined(separator: " "), p.terminationStatus)
+            }
+        } catch {
+            NSLog("screenpipe-tray: failed to run launchctl: %@", "\(error)")
+        }
+    }
+
+    /// Probe whether the engine's launchd job is loaded via `launchctl print`
+    /// (exit 0 ⇔ loaded). Runs off the main queue; folds the result back on
+    /// main and re-applies state. Callers gate the call frequency.
+    func probeJobLoaded() {
+        let label = flags.launchdLabel
+        let uid = getuid()
+        lastLoadedProbe = Date()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            p.arguments = ["print", "gui/\(uid)/\(label)"]
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            var loaded = true  // fail-safe: assume loaded so we don't cry "stopped" spuriously
+            do {
+                try p.run()
+                p.waitUntilExit()
+                loaded = (p.terminationStatus == 0)
+            } catch {
+                NSLog("screenpipe-tray: failed to run launchctl print: %@", "\(error)")
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.jobLoaded = loaded
+                self.applyState()
             }
         }
     }
