@@ -6,6 +6,10 @@ name: Rust CI
 
 on:
   push:
+    # main only: PR branches are covered by the pull_request trigger below,
+    # and the unfiltered push trigger ran the whole suite twice per PR push.
+    branches:
+      - main
     paths:
       - '**.rs'
       - '**/Cargo.toml'
@@ -249,7 +253,10 @@ jobs:
       # pipes_test removed — pipe manager system deleted in #2212
 
   test-macos:
-    runs-on: macos-latest
+    # Pinned: during the macos-latest 15→26 rollout, the macos-15-arm64
+    # image's clang 21 fails to link screenpipe-screen test binaries while
+    # macos-26-arm64 links fine on the same SHA (issue #6).
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       - uses: actions/cache@v4
