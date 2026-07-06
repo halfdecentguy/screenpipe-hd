@@ -15,7 +15,8 @@ SF-Symbol icon:
 | ⏺ `record.circle` | recording | engine healthy, capture running |
 | ⏸ `pause.circle` | paused | manual pause, media auto-detect, DRM content, or schedule |
 | ⚠ `exclamationmark.circle` | stalled | `audio_db_write_stalled \|\| vision_db_write_stalled` |
-| ⃠ `slash.circle` | down | `/health` unreachable (crash, memwatch kill) |
+| ⃠ `slash.circle` | down | `/health` unreachable **and job still loaded** (crash, memwatch kill — launchd may resurrect it) |
+| ⏹ `stop.circle` | stopped | `/health` unreachable **and job unloaded** — you turned the engine off via Stop Engine |
 
 The first menu line spells out the state, including the resume countdown for a
 timed manual pause (from `media_manual_pause_until_ms`).
@@ -29,7 +30,24 @@ timed manual pause (from `media_manual_pause_until_ms`).
 - **Resume Recording** → `POST /recording/resume`. Only enabled while a manual
   pause is active — it does not (and cannot) override the DRM/schedule/media
   auto-pauses.
-- **Restart Engine** → `launchctl kickstart -k gui/$UID/<label>`.
+- **Restart Engine** → `launchctl kickstart -k gui/$UID/<label>`. Disabled
+  while the engine is *stopped* (kickstart has nothing to kick on an unloaded
+  job — use Start Engine instead).
+- **Stop Engine / Start Engine** → the engine kill switch. Because the engine
+  agent runs with `KeepAlive={Crashed:true}`, simply killing the process would
+  let launchd respawn it — so Stop actually *unloads* the job:
+  - **Stop Engine** → `launchctl bootout gui/$UID/<label>` (stops the process
+    **and** unloads the job; a non-zero exit when it's already unloaded is
+    treated as success). The icon goes to ⏹ *stopped*, and the pause items,
+    Resume, and Restart Engine all disable — only Start Engine and Quit remain.
+  - **Start Engine** → `launchctl bootstrap gui/$UID <engine-plist>`;
+    `RunAtLoad=true` starts the engine immediately. Expect a few seconds of ⃠
+    *down* while it binds `:3030`, then the poll flips the icon to ⏺.
+
+  The tray distinguishes *stopped* from *down* by probing the loaded state with
+  `launchctl print gui/$UID/<label>` (exit 0 ⇔ loaded) — only while `/health` is
+  unreachable, throttled to at most one probe per 10 s. It never shells out on
+  the happy path: a live `/health` means the job is trivially loaded.
 
 ## Build & install
 
@@ -51,11 +69,16 @@ Run ad hoc instead:
 
 ```sh
 ./screenpipe-tray --port 3030 --launchd-label com.bogdan.screenpipe \
-    --engine-bin ~/projects/Personal/screenpipe/target/release/screenpipe
+    --engine-bin ~/projects/Personal/screenpipe/target/release/screenpipe \
+    --engine-plist ~/Library/LaunchAgents/com.bogdan.screenpipe.plist
 ```
 
 `--launchd-label` is the *engine's* agent label (what Restart Engine
-kickstarts), not this app's.
+kickstarts and Stop/Start Engine unloads/loads), not this app's.
+
+`--engine-plist` is the launchd plist Start Engine bootstraps; it defaults to
+`~/Library/LaunchAgents/<launchd-label>.plist`, so you only need it if the
+engine's plist lives elsewhere.
 
 ## Auth
 
