@@ -53,6 +53,11 @@ export CMAKE_BUILD_PARALLEL_LEVEL=4
 # thin LTO: memwatch SIGKILLs the fat-LTO link (~7.8 GB > its 6144 MB
 # line). Do NOT remove this or pause memwatch to build.
 export CARGO_PROFILE_RELEASE_LTO=thin
+# macOS 27: release `strip = true` also strips proc-macro dylibs, and the
+# new /usr/bin/strip leaves them unloadable ("mis-aligned LINKEDIT string
+# pool" dlopen error on sqlx_macros → bogus sqlx E0432). Don't strip
+# build-time artifacts; the final binary is still stripped.
+export CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=false
 # -j 4: this machine has 16 GB RAM; fat-LTO release builds at full
 # parallelism have frozen it before. Do not raise.
 nice -n 10 cargo build --release -j 4 -p screenpipe-engine --bin screenpipe --features metal,apple-intelligence
