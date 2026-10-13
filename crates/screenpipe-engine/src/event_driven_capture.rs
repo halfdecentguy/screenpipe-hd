@@ -2065,6 +2065,28 @@ async fn do_capture(
         }
     }
 
+    // Final incognito gate on the resolved window title. The tree walker's
+    // incognito check can miss (e.g. its AppleScript probe is TCC-denied when
+    // the engine runs under launchd), which let frames of private windows —
+    // title, URL and accessibility text — reach the DB while the title-based
+    // incognito monitor was already pausing audio for the same window.
+    if screenpipe_config::incognito::ignore_incognito_windows()
+        && window_name_owned
+            .as_deref()
+            .is_some_and(screenpipe_a11y::incognito::is_title_private)
+    {
+        screenpipe_config::incognito::report_incognito_window_present();
+        debug!(
+            "skipping capture: private-browsing window title on monitor {}",
+            params.monitor_id
+        );
+        return Ok(CaptureOutput {
+            result: None,
+            image,
+            elements_deduped: false,
+        });
+    }
+
     // DRM content detection: check if the focused app/URL is a streaming service.
     // When detected, set the global pause flag so ALL monitors stop capture
     // and the monitor watcher releases all SCK handles.

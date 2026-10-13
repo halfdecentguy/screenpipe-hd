@@ -1144,6 +1144,11 @@ impl AudioManager {
         Ok(())
     }
 
+    /// True while a DRM pause holds output devices stopped on purpose.
+    pub async fn has_drm_paused_outputs(&self) -> bool {
+        !self.drm_stopped_devices.read().await.is_empty()
+    }
+
     /// Restart SCK-based (Output) audio devices after DRM clears.
     pub async fn start_output_devices(&self) -> Result<()> {
         let devices = std::mem::take(&mut *self.drm_stopped_devices.write().await);

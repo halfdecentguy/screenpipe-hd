@@ -52,6 +52,49 @@ const AUDIO_RECEIVE_TIMEOUT_SECS: u64 = 8;
 /// ScreenCaptureKit may take a moment to begin delivering callbacks.
 const STREAM_STARTUP_GRACE_SECS: u64 = 10;
 
+/// Base no-callback timeout for output (system audio) streams.
+///
+/// Output devices are exempt from AUDIO_RECEIVE_TIMEOUT_SECS because they may
+/// legitimately go quiet, which left a zombie ScreenCaptureKit stream (no
+/// callbacks at all after lock/unlock) recording nothing for hours. This
+/// watchdog checks callback *liveness*, not sample energy: silent buffers
+/// count as alive, so real silence (SCK keeps delivering zero buffers) never
+/// trips it. Only a stream that delivered no buffers at all for this long is
+/// rebuilt.
+///
+/// Some macOS versions reportedly stop SCK callbacks during prolonged silence.
+/// To keep that case from churning, the timeout doubles after each trip that
+/// is not followed by a single callback (see `output_watchdog_timeout`), up
+/// to OUTPUT_NO_CALLBACK_MAX_TIMEOUT_SECS, and resets on the first callback.
+const OUTPUT_NO_CALLBACK_TIMEOUT_SECS: u64 = 60;
+const OUTPUT_NO_CALLBACK_MAX_TIMEOUT_SECS: u64 = 15 * 60;
+
+/// Consecutive output-watchdog trips per device with no callback in between.
+/// Global because each rebuild spawns a fresh recorder task.
+fn output_watchdog_trips() -> &'static std::sync::Mutex<std::collections::HashMap<String, u32>> {
+    static TRIPS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> =
+        std::sync::OnceLock::new();
+    TRIPS.get_or_init(Default::default)
+}
+
+fn output_watchdog_timeout(consecutive_trips: u32) -> Duration {
+    let secs = OUTPUT_NO_CALLBACK_TIMEOUT_SECS
+        .saturating_mul(2u64.saturating_pow(consecutive_trips.min(10)))
+        .min(OUTPUT_NO_CALLBACK_MAX_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
+/// Whether an output stream with no callback since `last_callback_elapsed`
+/// should be rebuilt.
+fn should_rebuild_silent_output(
+    stream_elapsed: Duration,
+    last_callback_elapsed: Duration,
+    consecutive_trips: u32,
+) -> bool {
+    stream_elapsed.as_secs() >= STREAM_STARTUP_GRACE_SECS
+        && last_callback_elapsed >= output_watchdog_timeout(consecutive_trips)
+}
+
 /// Maximum tolerated duration of zero-fill input buffers before declaring
 /// the stream functionally dead.
 ///
@@ -177,6 +220,10 @@ pub async fn run_record_and_transcribe(
     // trigger the watchdog: rebuilding them wouldn't help anyway, and the
     // tight rebuild loop is itself a problem (recovery storm).
     let mut last_non_zero_at: Option<Instant> = None;
+    // Last time ANY buffer (silent or not) arrived — the output watchdog's
+    // liveness signal. Starts at stream start so a stream that never fires
+    // a single callback is caught too.
+    let mut last_callback_at = Instant::now();
     let mut segment_count: u64 = 0;
 
     let mut was_paused_for_lock = false;
@@ -264,6 +311,8 @@ pub async fn run_record_and_transcribe(
             );
             was_paused_for_incognito = false;
             segment_start_time = now_epoch_secs();
+            // We stopped reading during the pause; don't count it as dead air.
+            last_callback_at = Instant::now();
         }
 
         // Pause audio while media playback is suppressing capture (a movie /
@@ -299,6 +348,8 @@ pub async fn run_record_and_transcribe(
             );
             was_paused_for_media = false;
             segment_start_time = now_epoch_secs();
+            // We stopped reading during the pause; don't count it as dead air.
+            last_callback_at = Instant::now();
         }
 
         while collected_audio.len() < max_samples
@@ -312,6 +363,12 @@ pub async fn run_record_and_transcribe(
             //     manager gate only checks incognito, so media must drop here.
             && !screenpipe_config::incognito::audio_suppressed_for_incognito()
             && !screenpipe_config::media::audio_suppressed_for_media()
+            // Leave the segment on lock too. Without this, an output stream
+            // whose callbacks stopped never fills a segment, so it never
+            // returned to the outer loop, never paused for the lock, and never
+            // took the rebuild-on-unlock path above (System Audio stayed dead
+            // from lock until an unrelated DRM restart, 2026-10-12).
+            && !screenpipe_config::should_pause_audio_for_lock()
         {
             match recv_audio_chunk(
                 &mut receiver,
@@ -320,6 +377,7 @@ pub async fn run_record_and_transcribe(
                 &metrics,
                 &stream_start,
                 &mut last_non_zero_at,
+                &mut last_callback_at,
             )
             .await?
             {
@@ -421,6 +479,7 @@ async fn recv_audio_chunk(
     metrics: &Arc<AudioPipelineMetrics>,
     stream_start: &Instant,
     last_non_zero_at: &mut Option<Instant>,
+    last_callback_at: &mut Instant,
 ) -> Result<Option<Vec<f32>>> {
     let recv_result = tokio::time::timeout(
         Duration::from_secs(AUDIO_RECEIVE_TIMEOUT_SECS),
@@ -430,6 +489,12 @@ async fn recv_audio_chunk(
 
     match recv_result {
         Ok(Ok(chunk)) => {
+            *last_callback_at = Instant::now();
+            if audio_stream.device.device_type == DeviceType::Output {
+                if let Ok(mut trips) = output_watchdog_trips().lock() {
+                    trips.remove(device_name);
+                }
+            }
             metrics.update_audio_level(&chunk);
             metrics.update_audio_level_for_device(device_name, &chunk);
 
@@ -505,10 +570,43 @@ async fn recv_audio_chunk(
             //   callbacks. Treat silence as non-fatal on both — the separate
             //   device_monitor watchdog detects genuine device removal via the
             //   OS device list.
+            //
+            // But a stream with NO callbacks for a long time is a zombie (seen
+            // after lock/unlock on macOS) — rebuild it. See
+            // OUTPUT_NO_CALLBACK_TIMEOUT_SECS for why this tolerates silence.
             #[cfg(any(target_os = "windows", target_os = "macos"))]
             {
-                use crate::core::device::DeviceType;
                 if audio_stream.device.device_type == DeviceType::Output {
+                    let trips = output_watchdog_trips()
+                        .lock()
+                        .map(|t| t.get(device_name).copied().unwrap_or(0))
+                        .unwrap_or(0);
+                    if should_rebuild_silent_output(
+                        stream_start.elapsed(),
+                        last_callback_at.elapsed(),
+                        trips,
+                    ) {
+                        warn!(
+                            "no callbacks from output device {} for {}s (stream likely dead), \
+                             triggering rebuild (watchdog trip {})",
+                            device_name,
+                            last_callback_at.elapsed().as_secs(),
+                            trips + 1
+                        );
+                        if let Ok(mut t) = output_watchdog_trips().lock() {
+                            *t.entry(device_name.to_string()).or_insert(0) += 1;
+                        }
+                        metrics.record_stream_timeout();
+                        // Not `is_disconnected`: the device still exists, the
+                        // session needs a reset. device_monitor's stale-handle
+                        // check restarts it, same as the unlock path.
+                        return Err(anyhow!(
+                            "output stream {} delivered no callbacks for {}s \
+                             (recovery is automatic via device_monitor)",
+                            device_name,
+                            last_callback_at.elapsed().as_secs()
+                        ));
+                    }
                     debug!(
                         "no audio from output device {} for {}s (nothing playing), continuing",
                         device_name, AUDIO_RECEIVE_TIMEOUT_SECS
@@ -652,6 +750,47 @@ mod tests {
         assert_eq!(frame.channels, 1);
         assert_eq!(frame.sample_rate, 48_000);
         assert_eq!(frame.samples.as_ref(), &samples);
+    }
+
+    #[test]
+    fn output_watchdog_ignores_startup_grace_and_short_gaps() {
+        let past_grace = Duration::from_secs(STREAM_STARTUP_GRACE_SECS + 1);
+        // In startup grace: never rebuild, however long the gap.
+        assert!(!should_rebuild_silent_output(
+            Duration::from_secs(STREAM_STARTUP_GRACE_SECS - 1),
+            Duration::from_secs(OUTPUT_NO_CALLBACK_MAX_TIMEOUT_SECS + 1),
+            0
+        ));
+        // Short gaps (e.g. one 8s receive timeout) are fine.
+        assert!(!should_rebuild_silent_output(
+            past_grace,
+            Duration::from_secs(AUDIO_RECEIVE_TIMEOUT_SECS),
+            0
+        ));
+        assert!(should_rebuild_silent_output(
+            past_grace,
+            Duration::from_secs(OUTPUT_NO_CALLBACK_TIMEOUT_SECS),
+            0
+        ));
+    }
+
+    #[test]
+    fn output_watchdog_backs_off_after_fruitless_trips() {
+        assert_eq!(
+            output_watchdog_timeout(0),
+            Duration::from_secs(OUTPUT_NO_CALLBACK_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            output_watchdog_timeout(1),
+            Duration::from_secs(OUTPUT_NO_CALLBACK_TIMEOUT_SECS * 2)
+        );
+        assert_eq!(
+            output_watchdog_timeout(u32::MAX),
+            Duration::from_secs(OUTPUT_NO_CALLBACK_MAX_TIMEOUT_SECS)
+        );
+        let past_grace = Duration::from_secs(STREAM_STARTUP_GRACE_SECS + 1);
+        let one_base = Duration::from_secs(OUTPUT_NO_CALLBACK_TIMEOUT_SECS);
+        assert!(!should_rebuild_silent_output(past_grace, one_base, 1));
     }
 
     #[test]

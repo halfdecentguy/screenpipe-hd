@@ -103,6 +103,13 @@ impl OutputRecoveryBackoff {
         self.is_permanent = false;
     }
 
+    /// Reset and make the next check fire immediately (e.g. on unlock, when
+    /// the display that SCK anchors to is back).
+    fn reset_now(&mut self) {
+        self.reset();
+        self.last_attempt = Self::new().last_attempt;
+    }
+
     fn next_delay_secs(&self) -> u64 {
         if self.attempts == 0 {
             return 0;
@@ -344,6 +351,7 @@ pub async fn start_device_monitor(
         // every 2 seconds. After a failure, back off for increasing durations.
         let mut failed_devices: HashMap<String, (u32, Instant)> = HashMap::new();
         let mut output_recovery_backoff = OutputRecoveryBackoff::new();
+        let mut was_locked = false;
         let mut no_input_retry_count: u32 = 0;
         let mut last_no_input_log: Option<Instant> = None;
 
@@ -389,6 +397,9 @@ pub async fn start_device_monitor(
                 // to recover from silent CoreAudio stream failures.
                 if crate::stream_invalidation::take() {
                     info!("[DEVICE_RECOVERY] audio stream invalidation requested (wake/display change), restarting all devices");
+                    // A display may have come back: let output recovery retry
+                    // right away instead of waiting out a long backoff.
+                    output_recovery_backoff.reset_now();
                     let enabled = audio_manager.enabled_devices().await;
                     for device_name in &enabled {
                         if let Ok(device) = parse_audio_device(device_name) {
@@ -857,7 +868,23 @@ pub async fn start_device_monitor(
                             }
                         };
 
-                        if !has_output && !output_user_disabled {
+                        // While locked/asleep, SCK typically enumerates zero
+                        // displays, so every start fails with "Audio device not
+                        // found" and the backoff climbs (51 attempts over ~8h
+                        // on 2026-10-12). The recorder would pause anyway, so
+                        // don't try; on unlock, retry immediately.
+                        let locked = screenpipe_config::should_pause_audio_for_lock();
+                        if was_locked && !locked && !has_output {
+                            info!("[DEVICE_RECOVERY] screen unlocked, retrying output device immediately");
+                            output_recovery_backoff.reset_now();
+                        }
+                        was_locked = locked;
+                        // DRM pause stops outputs on purpose and `start_device`
+                        // is a no-op for them; without this skip the monitor
+                        // "restored" the device every 2s for the whole pause.
+                        let drm_paused = audio_manager.has_drm_paused_outputs().await;
+
+                        if !has_output && !output_user_disabled && !locked && !drm_paused {
                             // Apply backoff: skip this cycle if we haven't waited long enough.
                             // Transient errors (SCK not ready) use short backoff (2-8s).
                             // Permanent errors (no display) use longer backoff (up to 120s).
@@ -911,7 +938,7 @@ pub async fn start_device_monitor(
                                     }
                                 }
                             }
-                        } else {
+                        } else if has_output {
                             output_recovery_backoff.reset();
                         }
                     }
@@ -1517,6 +1544,18 @@ mod tests {
         assert_eq!(b.next_delay_secs(), 120);
         b.record_failure(true); // still 120s
         assert_eq!(b.next_delay_secs(), 120);
+    }
+
+    #[test]
+    fn test_backoff_reset_now_fires_immediately() {
+        let mut b = OutputRecoveryBackoff::new();
+        for _ in 0..8 {
+            b.record_failure(true);
+        }
+        b.last_attempt = Instant::now();
+        b.reset_now();
+        assert_eq!(b.next_delay_secs(), 0);
+        assert!(b.last_attempt.elapsed() >= Duration::from_secs(b.next_delay_secs()));
     }
 
     #[test]

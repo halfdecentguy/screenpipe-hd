@@ -250,8 +250,10 @@ fn setup_logging(
         }
     };
 
+    // Local time with its real UTC offset (e.g. +08:00). The old format
+    // printed local time with a literal "Z", so logs claimed UTC but weren't.
     let timer =
-        tracing_subscriber::fmt::time::ChronoLocal::new("%Y-%m-%dT%H:%M:%S%.6fZ".to_string());
+        tracing_subscriber::fmt::time::ChronoLocal::new("%Y-%m-%dT%H:%M:%S%.6f%:z".to_string());
 
     let tracing_registry = tracing_subscriber::registry()
         .with(

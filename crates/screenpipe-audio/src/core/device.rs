@@ -295,6 +295,16 @@ pub async fn get_cpal_device_and_config(
                                 }
                             }
                         }
+                        if result.is_none() {
+                            // SCK needs a display to anchor the audio stream;
+                            // with none (display asleep / screen locked) the
+                            // lookup can't succeed until one comes back.
+                            return Err(anyhow!(
+                                "Audio device not found: {} (ScreenCaptureKit reports no \
+                                 usable display — display asleep or screen locked?)",
+                                device_name
+                            ));
+                        }
                         result
                     }
                     Err(e) => {
