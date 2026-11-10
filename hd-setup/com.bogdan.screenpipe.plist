@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.bogdan.screenpipe</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/bogdanlitvak/projects/Personal/screenpipe/target/release/screenpipe</string>
+        <string>record</string>
+        <string>--disable-telemetry</string>
+        <string>--retention-days</string>
+        <string>14</string>
+        <string>--retention-mode</string>
+        <string>media</string>
+        <string>--pause-on-drm-content</string>
+        <string>--audio-transcription-engine</string>
+        <string>whisper-large-v3-turbo-quantized</string>
+        <string>--language</string>
+        <string>english</string>
+        <string>--language</string>
+        <string>russian</string>
+        <string>--language</string>
+        <string>ukrainian</string>
+        <string>--ignored-windows</string>
+        <string>Passwords</string>
+        <string>--ignored-windows</string>
+        <string>Keychain Access</string>
+        <string>--ignored-windows</string>
+        <string>1Password</string>
+        <!-- Add your bank as a URL filter, e.g.:
+        <string>--ignored-urls</string>
+        <string>mybank.com</string>
+        -->
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- /opt/homebrew first: the arm64 ffmpeg lives there -->
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/bogdanlitvak/Library/Logs/screenpipe.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/bogdanlitvak/Library/Logs/screenpipe.err.log</string>
+</dict>
+</plist>

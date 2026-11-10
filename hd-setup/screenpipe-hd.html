@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>screenpipe-hd — project hub report</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Crimson+Text:ital@0;1&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #FFFFFF; --fg: #000000; --muted: #666666; --border: #CCCCCC; --faint: #F5F5F5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #000000; --fg: #FFFFFF; --muted: #999999; --border: #333333; --faint: #111111; }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; border-radius: 0; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font-family: 'Crimson Text', Baskerville, 'Times New Roman', serif;
+    font-size: 17px; line-height: 1.55;
+  }
+  h1, h2, h3, h4 { font-family: 'Space Grotesk', system-ui, sans-serif; text-transform: lowercase; font-weight: 500; }
+  code, .mono, td.num, .stat-value { font-family: 'IBM Plex Mono', monospace; }
+  a { color: var(--fg); text-decoration: underline; text-underline-offset: 3px; transition: opacity 150ms; }
+  a:hover { opacity: 0.6; }
+
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 0 24px 80px; }
+
+  header.masthead { border-bottom: 1px solid var(--fg); padding: 48px 0 28px; }
+  .masthead .kicker { font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--muted); margin-bottom: 14px; }
+  .masthead h1 { font-size: 44px; font-weight: 700; letter-spacing: -0.02em; }
+  .masthead .sub { font-size: 19px; font-style: italic; color: var(--muted); margin-top: 10px; max-width: 760px; }
+
+  nav.toc { display: flex; flex-wrap: wrap; border: 1px solid var(--fg); border-top: none; }
+  nav.toc a { flex: 1 1 auto; text-align: center; padding: 10px 14px; font-family: 'Space Grotesk', sans-serif; font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; text-decoration: none; border-right: 1px solid var(--border); transition: background 150ms, color 150ms; white-space: nowrap; }
+  nav.toc a:last-child { border-right: none; }
+  nav.toc a:hover { background: var(--fg); color: var(--bg); opacity: 1; }
+
+  .statband { display: grid; grid-template-columns: repeat(6, 1fr); border: 1px solid var(--fg); border-top: none; }
+  .stat { padding: 16px 14px; border-right: 1px solid var(--border); }
+  .stat:last-child { border-right: none; }
+  .stat-value { font-size: 22px; font-weight: 500; display: block; }
+  .stat-label { font-family: 'Space Grotesk', sans-serif; font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
+
+  section { margin-top: 56px; }
+  section > h2 { font-size: 28px; border-bottom: 1px solid var(--fg); padding-bottom: 8px; margin-bottom: 22px; }
+  section > h2 .secno { font-family: 'IBM Plex Mono', monospace; font-size: 14px; color: var(--muted); margin-right: 12px; }
+  h3 { font-size: 19px; margin: 26px 0 10px; }
+  p { margin-bottom: 12px; max-width: 860px; }
+  p.lede { font-size: 19px; }
+  .muted { color: var(--muted); }
+
+  table { width: 100%; border-collapse: collapse; margin: 14px 0 6px; font-size: 15.5px; }
+  th { font-family: 'Space Grotesk', sans-serif; font-size: 11px; letter-spacing: 0.13em; text-transform: uppercase; text-align: left; color: var(--muted); border-bottom: 1px solid var(--fg); padding: 8px 12px 8px 0; font-weight: 500; }
+  td { border-bottom: 1px solid var(--border); padding: 9px 12px 9px 0; vertical-align: top; }
+  td:first-child { font-family: 'IBM Plex Mono', monospace; font-size: 13.5px; white-space: nowrap; }
+  tr:hover td { background: var(--faint); }
+
+  ul.facts { list-style: none; margin: 10px 0; }
+  ul.facts li { padding: 7px 0 7px 22px; border-bottom: 1px solid var(--border); position: relative; max-width: 880px; }
+  ul.facts li::before { content: "—"; position: absolute; left: 0; color: var(--muted); }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 36px; }
+
+  .card { border: 1px solid var(--fg); padding: 18px 20px; margin: 14px 0; }
+  .card h4 { font-size: 15px; letter-spacing: 0.06em; margin-bottom: 6px; }
+  .card p { font-size: 15.5px; margin-bottom: 0; }
+
+  .pill { display: inline-block; border: 1px solid var(--fg); font-family: 'Space Grotesk', sans-serif; font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; padding: 2px 8px; margin: 0 6px 6px 0; }
+
+  .risk { border-left: 3px solid var(--fg); padding: 10px 16px; margin: 12px 0; background: var(--faint); }
+  .risk b { font-family: 'Space Grotesk', sans-serif; font-size: 14px; text-transform: lowercase; letter-spacing: 0.03em; }
+  .risk p { font-size: 15px; margin: 4px 0 0; }
+  .sev { font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); float: right; }
+
+  .diagram { border: 1px solid var(--fg); margin: 18px 0; padding: 10px; overflow-x: auto; }
+  .diagram svg { display: block; min-width: 880px; width: 100%; height: auto; }
+
+  footer { margin-top: 72px; border-top: 1px solid var(--fg); padding-top: 18px; font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: var(--muted); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+
+  @media (max-width: 760px) {
+    .statband { grid-template-columns: repeat(3, 1fr); }
+    .stat:nth-child(3) { border-right: none; }
+    .stat:nth-child(-n+3) { border-bottom: 1px solid var(--border); }
+    .grid2 { grid-template-columns: 1fr; }
+    .masthead h1 { font-size: 32px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="masthead">
+  <div class="kicker">hub report · generated 2026-06-11 · head 1a99c64aa (detached, at main tip)</div>
+  <h1>screenpipe-hd</h1>
+  <p class="sub">AI that knows everything you've seen, said, or heard. Context infrastructure for AI agents — screen, audio, and UI captured 24/7, indexed locally, served to any agent. YC&nbsp;S26.</p>
+</header>
+
+<nav class="toc">
+  <a href="#overview">overview</a>
+  <a href="#architecture">architecture</a>
+  <a href="#capture">capture</a>
+  <a href="#data">data &amp; intelligence</a>
+  <a href="#app">desktop app</a>
+  <a href="#ecosystem">ecosystem</a>
+  <a href="#product">product &amp; docs</a>
+  <a href="#ops">operations</a>
+  <a href="#risks">risk register</a>
+</nav>
+
+<div class="statband">
+  <div class="stat"><span class="stat-value">19,252</span><span class="stat-label">github stars</span></div>
+  <div class="stat"><span class="stat-value">1,102</span><span class="stat-label">commits / 30 days</span></div>
+  <div class="stat"><span class="stat-value">19</span><span class="stat-label">rust crates</span></div>
+  <div class="stat"><span class="stat-value">1,641</span><span class="stat-label">rust test blocks</span></div>
+  <div class="stat"><span class="stat-value">24</span><span class="stat-label">ci workflows</span></div>
+  <div class="stat"><span class="stat-value">58</span><span class="stat-label">open issues</span></div>
+</div>
+
+<!-- ============================== OVERVIEW ============================== -->
+<section id="overview">
+  <h2><span class="secno">01</span>overview</h2>
+  <p class="lede">Screenpipe records the screen, audio, and UI events of a machine continuously, locally, and privately, then makes that record searchable and actionable by AI. The product is three verbs — <i>Record, Rewind, Ask</i> — and the roadmap runs from desktop memory (now) to the context layer for AI agents (next) to recording everything, 24/7, encrypted (later).</p>
+  <p>The monorepo is a Rust workspace of 19 crates plus a Tauri desktop app, five TypeScript packages, and an enterprise tree. Capture is accessibility-tree-first with OCR fallback; everything lands in a local SQLite database behind a localhost REST API that the app, CLI, MCP server, SDK, and browser extension all consume.</p>
+  <h3>current versions</h3>
+  <table>
+    <tr><th>artifact</th><th>version</th><th>distribution</th></tr>
+    <tr><td>desktop app</td><td class="num">v2.5.31</td><td>signed .app / dmg / nsis / deb / appimage — Tauri 2.11.2, Next.js 15.1.4, React 18.3.1</td></tr>
+    <tr><td>rust workspace</td><td class="num">v0.4.17</td><td>19 crates, edition 2021; engine doubles as standalone CLI binary</td></tr>
+    <tr><td>screenpipe-mcp</td><td class="num">v0.18.10</td><td>npm — stdio + HTTP streaming transports, 30 tools</td></tr>
+    <tr><td>cli (npm wrapper)</td><td class="num">v0.1.0</td><td>npm — prebuilt native binaries for darwin-arm64/x64, linux-x64, win32-x64</td></tr>
+    <tr><td>enterprise sdk</td><td class="num">v0.4.3</td><td>npm NAPI-RS — Electron / Tauri / Swift / Node embedding, commercial license</td></tr>
+    <tr><td>browser extension</td><td class="num">v0.3.4</td><td>Chrome Web Store — WebSocket + eval bridge to localhost:3030</td></tr>
+  </table>
+  <p class="muted" style="font-size:15px">License moved from MIT to the Screenpipe Commercial License at v2.5.29 — free for personal use; Standard $25/mo, Pro $50/seat/mo, Enterprise $150/seat/mo (Intune/MDM, SSO/SAML).</p>
+</section>
+
+<!-- ============================== ARCHITECTURE ============================== -->
+<section id="architecture">
+  <h2><span class="secno">02</span>architecture</h2>
+  <p>One pipeline, three capture modalities, one store, many surfaces. The engine is compiled <i>into</i> the desktop app (in-process, not a sidecar) and also ships as a standalone binary. Privacy machinery — async PII redaction, vault encryption, keychain-backed secrets — sits beside the hot path, never on it.</p>
+  <div class="diagram">
+  <svg viewBox="0 0 980 560" xmlns="http://www.w3.org/2000/svg" font-family="'IBM Plex Mono', monospace">
+    <style>
+      .box { fill: none; stroke: var(--fg); stroke-width: 1.5; }
+      .boxlight { fill: none; stroke: var(--muted); stroke-width: 1; stroke-dasharray: 4 3; }
+      .t { fill: var(--fg); font-size: 13px; font-family: 'Space Grotesk', sans-serif; }
+      .tb { fill: var(--fg); font-size: 14px; font-weight: 600; font-family: 'Space Grotesk', sans-serif; }
+      .tm { fill: var(--muted); font-size: 11px; }
+      .arrow { stroke: var(--fg); stroke-width: 1.5; fill: none; marker-end: url(#ah); }
+    </style>
+    <defs>
+      <marker id="ah" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8" fill="none" stroke="var(--fg)" stroke-width="1.2"/>
+      </marker>
+    </defs>
+
+    <!-- column headers -->
+    <text x="90" y="24" class="tm" letter-spacing="2">CAPTURE</text>
+    <text x="420" y="24" class="tm" letter-spacing="2">ENGINE + STORE</text>
+    <text x="760" y="24" class="tm" letter-spacing="2">SURFACES</text>
+
+    <!-- capture boxes -->
+    <rect x="20" y="40" width="252" height="78" class="box"/>
+    <text x="34" y="62" class="tb">screenpipe-screen</text>
+    <text x="34" y="80" class="tm">ScreenCaptureKit · WGC · xcap</text>
+    <text x="34" y="96" class="tm">OCR: vision · media-ocr · tess.</text>
+
+    <rect x="20" y="132" width="252" height="78" class="box"/>
+    <text x="34" y="154" class="tb">screenpipe-a11y</text>
+    <text x="34" y="172" class="tm">CGEventTap+AX · UIA · AT-SPI2</text>
+    <text x="34" y="188" class="tm">keys · mouse · clipboard · trees</text>
+
+    <rect x="20" y="224" width="252" height="106" class="box"/>
+    <text x="34" y="246" class="tb">screenpipe-audio</text>
+    <text x="34" y="264" class="tm">cpal fork · VAD silero/webrtc</text>
+    <text x="34" y="280" class="tm">ASR: whisper · parakeet-mlx</text>
+    <text x="34" y="296" class="tm">qwen3 · deepgram (cloud)</text>
+    <text x="34" y="312" class="tm">diarization: embed → cluster</text>
+
+    <rect x="20" y="344" width="252" height="74" class="box"/>
+    <text x="34" y="366" class="tb">screenpipe-capture</text>
+    <text x="34" y="384" class="tm">paired screenshot + AX tree</text>
+    <text x="34" y="400" class="tm">OCR fallback when tree is sparse</text>
+
+    <!-- engine -->
+    <rect x="330" y="40" width="280" height="120" class="box"/>
+    <text x="344" y="62" class="tb">screenpipe-engine</text>
+    <text x="344" y="80" class="tm">axum REST · 127.0.0.1:3030 · 25 routes</text>
+    <text x="344" y="96" class="tm">/search /artifacts /frames /meetings</text>
+    <text x="344" y="112" class="tm">/memories /speakers /transcribe …</text>
+    <text x="344" y="132" class="tm">meeting detector · pipes · watchdog</text>
+
+    <rect x="330" y="180" width="280" height="92" class="box"/>
+    <text x="344" y="202" class="tb">screenpipe-db</text>
+    <text x="344" y="220" class="tm">SQLite + FTS5 + sqlite-vec</text>
+    <text x="344" y="236" class="tm">90 migrations · frames · transcripts</text>
+    <text x="344" y="252" class="tm">elements · meetings · memories</text>
+
+    <!-- privacy rail -->
+    <rect x="330" y="300" width="280" height="118" class="boxlight"/>
+    <text x="344" y="322" class="tb">privacy rail (off hot path)</text>
+    <text x="344" y="342" class="tm">redact: regex → tinfoil → ONNX (text)</text>
+    <text x="344" y="358" class="tm">RF-DETR-nano MLX 7.9ms (image PII)</text>
+    <text x="344" y="374" class="tm">vault: Argon2 + ChaCha20-Poly1305</text>
+    <text x="344" y="390" class="tm">secrets: AES-256-GCM + OS keychain</text>
+    <text x="344" y="406" class="tm">sync: ticketed presigned-URL uploads</text>
+
+    <!-- surfaces -->
+    <rect x="690" y="40" width="270" height="66" class="box"/>
+    <text x="704" y="62" class="tb">desktop app (tauri)</text>
+    <text x="704" y="80" class="tm">engine embedded in-process</text>
+    <text x="704" y="94" class="tm">rewind · search · chat · brain · tray</text>
+
+    <rect x="690" y="120" width="270" height="50" class="box"/>
+    <text x="704" y="142" class="tb">mcp server — 30 tools</text>
+    <text x="704" y="158" class="tm">claude / cursor · stdio + http</text>
+
+    <rect x="690" y="184" width="270" height="50" class="box"/>
+    <text x="704" y="206" class="tb">cli (npm) + sdk (napi)</text>
+    <text x="704" y="222" class="tm">record · auth · search · embeddable</text>
+
+    <rect x="690" y="248" width="270" height="50" class="box"/>
+    <text x="704" y="270" class="tb">browser extension</text>
+    <text x="704" y="286" class="tm">ws://3030/browser · dom eval for pipes</text>
+
+    <rect x="690" y="312" width="270" height="66" class="box"/>
+    <text x="704" y="334" class="tb">pipes + connect</text>
+    <text x="704" y="352" class="tm">event-triggered agents · cloud runners</text>
+    <text x="704" y="368" class="tm">65 connectors: slack · gmail · …</text>
+
+    <!-- arrows capture -> engine -->
+    <path d="M272,79 L330,90" class="arrow"/>
+    <path d="M272,171 L330,110" class="arrow"/>
+    <path d="M272,277 L330,130" class="arrow"/>
+    <path d="M272,381 L330,150" class="arrow"/>
+    <!-- engine <-> db -->
+    <path d="M470,160 L470,180" class="arrow"/>
+    <!-- db <-> privacy -->
+    <path d="M470,272 L470,300" class="arrow"/>
+    <!-- engine -> surfaces -->
+    <path d="M610,73 L690,73" class="arrow"/>
+    <path d="M610,90 L690,145" class="arrow"/>
+    <path d="M610,105 L690,209" class="arrow"/>
+    <path d="M610,120 L690,273" class="arrow"/>
+    <path d="M610,135 L690,340" class="arrow"/>
+
+    <!-- platform footer -->
+    <rect x="20" y="440" width="940" height="92" class="boxlight"/>
+    <text x="34" y="464" class="tb">platform matrix</text>
+    <text x="34" y="486" class="tm">macos — ScreenCaptureKit · Vision OCR · CGEventTap+AX · CoreAudio/VoiceProcessingIO · Metal · MLX · Apple Intelligence (26+) · CoreML redaction</text>
+    <text x="34" y="504" class="tm">windows — WGC · Media OCR · SetWindowsHookEx+UIA · WASAPI (AEC-patched cpal) · DirectML redaction</text>
+    <text x="34" y="522" class="tm">linux — xcap · Tesseract · AT-SPI2/D-Bus · evdev · PipeWire/Pulse · CPU redaction</text>
+  </svg>
+  </div>
+</section>
+
+<!-- ============================== CAPTURE ============================== -->
+<section id="capture">
+  <h2><span class="secno">03</span>capture stack</h2>
+  <p>Eight crates, ~60k source lines. Vision is paired-capture: a screenshot and an accessibility-tree walk are taken together (200ms hard timeout for Electron-style deep trees), OCR fills in when the tree comes up short. Audio runs a full VAD → transcription → diarization → speaker-clustering pipeline with four interchangeable ASR backends. On-device ML is first-class on Apple Silicon.</p>
+  <table>
+    <tr><th>crate</th><th>purpose</th></tr>
+    <tr><td>screenpipe-screen</td><td>Screenshot capture + multi-engine OCR orchestration. Apple Vision, Windows Media OCR, Tesseract fork, cloud fallback; frame comparison, per-window capture, browser isolation.</td></tr>
+    <tr><td>screenpipe-a11y</td><td>UI event capture — keyboard, mouse, clipboard, window trees. Adaptive-FPS activity feed, capture budget throttling, password-field and incognito privacy guards.</td></tr>
+    <tr><td>screenpipe-audio</td><td>60+ files: device streams (custom cpal fork with WASAPI AEC + VoiceProcessingIO patches), Silero/WebRTC VAD, Whisper / Parakeet-MLX / Qwen3 / Deepgram engines, ONNX speaker embeddings and clustering.</td></tr>
+    <tr><td>screenpipe-capture</td><td>The paired-capture orchestrator: screenshot + AX tree → one frame row with JPEG snapshot, capture-trigger and text-source metadata.</td></tr>
+    <tr><td>screenpipe-apple-intelligence</td><td>FFI bindings to Apple Foundation Models (macOS 26+, aarch64 only); ships an <code>fm-server</code> binary for local on-device inference. Version-gated, no-op elsewhere.</td></tr>
+    <tr><td>screenpipe-rfdetr-mlx</td><td>RF-DETR-Nano image PII detector re-implemented in MLX: 7.9ms p50 at 126 FPS — 6.5× faster than the ONNX path; 12 PII classes; 41/42 detection parity with ONNX.</td></tr>
+    <tr><td>screenpipe-audio-eval</td><td>Diarization regression harness — DER/WER/speaker-continuity metrics, LibriSpeech fixtures, synthetic workday composition, pipeline replay.</td></tr>
+    <tr><td>screenpipe-meeting-eval</td><td>Replays scripted TOML scenarios and real JSONL traces through the production meeting-detection state machine (Idle/Confirming/Active/Ending); tracks flap count and end latency.</td></tr>
+  </table>
+  <ul class="facts">
+    <li>Five custom upstream forks carry platform fixes: cpal (echo cancellation), whisper-rs (tracing backend), vad-rs (Silero v5/v6), sck-rs (ScreenCaptureKit), rusty-tesseract.</li>
+    <li>Meeting detection has 60+ edge-case commits behind it (Zoom-idle, browser tab-switch, Arc toolbar flap) and its own eval suite — a real regression harness, not just unit tests.</li>
+    <li>Eval crates consume production code strictly through public APIs, so eval-vs-prod drift is structurally impossible.</li>
+  </ul>
+</section>
+
+<!-- ============================== DATA & INTELLIGENCE ============================== -->
+<section id="data">
+  <h2><span class="secno">04</span>data &amp; intelligence</h2>
+  <p>Eleven crates around one SQLite database and one HTTP server. The engine serves 25 route modules (~13.6k lines) on <code>127.0.0.1:3030</code>; recent work unified artifact retrieval under <code>GET /artifacts</code>. Three distinct encryption domains protect data at rest, secrets, and sync — each with its own key model.</p>
+  <div class="grid2">
+    <div>
+      <h3>storage &amp; api</h3>
+      <ul class="facts">
+        <li><b>screenpipe-db</b> — SQLite + FTS5 + sqlite-vec; 90 migrations (2,456 lines) spanning Jul 2024 → Jun 2026; 20+ tables: frames, audio_transcriptions, ocr_text, ui_events, elements, meetings, memories, pipe_executions; write-queue with disk-I/O wedge recovery.</li>
+        <li><b>screenpipe-engine</b> — axum, hot-frame LRU cache, jemalloc (non-Windows), memory watchdog, OpenAPI export at <code>/openapi.yaml</code>; runs standalone as the CLI daemon.</li>
+        <li><b>screenpipe-events</b> — in-memory tokio broadcast pub/sub (meeting, power, workflow, permission, pipe events); 10-minute inactivity pruning.</li>
+        <li><b>screenpipe-config</b> — TOML settings in <code>~/.screenpipe/</code>; device-tier detection (Low/Mid/High by RAM) tunes capture aggressiveness.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>privacy &amp; sync</h3>
+      <ul class="facts">
+        <li><b>screenpipe-redact</b> — async reconciliation worker off the capture path. Text: regex → Tinfoil confidential-compute enclave (SEV-SNP attestation) → local ONNX xlm-roberta (~280MB INT8, CoreML/DirectML/CPU). Image: RF-DETR + pixel masking. Hash-cached.</li>
+        <li><b>screenpipe-vault</b> — user-initiated at-rest encryption of the whole data dir; Argon2 → ChaCha20-Poly1305.</li>
+        <li><b>screenpipe-secrets</b> — AES-256-GCM secrets table, keys in the OS keychain; OAuth tokens migrated out of plaintext (PR #3986).</li>
+        <li><b>screenpipe-sync</b> — schema-free ticketed pipeline (presign → PUT → manifest); per-recipient key wrap; bytes-pool reuse so a 50MB retry costs 50MB, not 150MB.</li>
+        <li><b>screenpipe-connect</b> — 65 integration connectors: Slack, Telegram, Discord, Gmail, Notion, Linear, Jira, Salesforce, HubSpot, Calendly, Stripe, SSH/SFTP, mDNS, MCP servers…</li>
+        <li><b>screenpipe-team-memory</b> — MCP-shaped memory files (YAML frontmatter + markdown) with compute-provenance tracking (tier, model, attestation) for audit.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== DESKTOP APP ============================== -->
+<section id="app">
+  <h2><span class="secno">05</span>desktop app</h2>
+  <p>Tauri 2.11.2 shell around a Next.js 15 frontend — 427 TypeScript files (165 components, 153 lib utilities) and 77 Rust modules (<code>main.rs</code> ~2.0k lines, <code>commands.rs</code> ~3.5k). The capture engine compiles directly into the app binary; the same port-3030 API the ecosystem uses is what the frontend talks to, with bearer-token auth and WebSockets for live events.</p>
+  <div class="grid2">
+    <div>
+      <h3>surfaces</h3>
+      <ul class="facts">
+        <li>Multi-window: <code>/overlay</code> (rewind timeline), <code>/home</code>, <code>/search</code>, <code>/chat</code>, <code>/onboarding</code>, settings — one Next.js build, five+ Tauri windows, macOS floating-panel mode.</li>
+        <li>Brain section: windowed artifact list with chat-grade markdown + mermaid, fed by the new unified <code>/artifacts</code> API.</li>
+        <li>Native tray with patched muda fork (stable NSMenuItem lifecycle); icon states for idle/recording/error; global shortcuts (⌘⇧R show, ⌘⇧C chat).</li>
+        <li>Chat with source citations, MCP via a bundled bun runtime (no npx dependency), cloud or local model presets, voice memos.</li>
+        <li>Suggestions engine runs during idle + charging; prefers Apple Intelligence on-device when available.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>system integration</h3>
+      <ul class="facts">
+        <li>macOS TCC permission flows (screen, mic, calendar, accessibility, automation) with a custom permission-flow plugin and <code>tccutil</code> repair; dev builds signed with a stable cert so permissions survive rebuilds.</li>
+        <li>Calendar: EventKit native, Google Calendar OAuth, iCal — drives meeting-state tracking and live notes.</li>
+        <li>Updater with rollback via R2; enterprise builds policy-gate updates entirely.</li>
+        <li>Browser cookie inheritance via macOS Keychain (Arc/Chrome/Brave/Edge) for authenticated automation.</li>
+        <li>Deep links on <code>screenpipe://</code>; single-instance; autostart; Sentry + PostHog telemetry.</li>
+        <li>Bindings discipline: <code>tauri.ts</code> generated by tauri-specta; commands need both <code>#[tauri::command]</code> and <code>#[specta::specta]</code>, CI checks drift.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== ECOSYSTEM ============================== -->
+<section id="ecosystem">
+  <h2><span class="secno">06</span>ecosystem &amp; distributions</h2>
+  <table>
+    <tr><th>package</th><th>what it is</th></tr>
+    <tr><td>packages/screenpipe-mcp</td><td>MCP server, 30 tools: search-content, activity-summary, list-meetings, search-speakers, frame-context, export-video, team-search, control-recording, notifications… stdio for Claude Desktop/Cursor, HTTP streaming (port 11435) for remote. <code>claude mcp add screenpipe -- npx -y screenpipe-mcp@latest</code></td></tr>
+    <tr><td>packages/cli</td><td>npm wrapper spawning platform-native binaries (4 platform sub-packages); verbs: record, auth, config, search; clean signal forwarding for launchd/systemd/Docker.</td></tr>
+    <tr><td>packages/ai-gateway</td><td>Cloudflare Workers proxy to Anthropic / OpenAI / Deepgram / Google, Clerk-authenticated, Sentry-observed. Powers team cloud transcription and synthesis. Surfaces Claude Fable 5 in model pickers.</td></tr>
+    <tr><td>packages/browser-extension</td><td>Chrome extension bridging pipes into authenticated browser tabs — WebSocket listener plus <code>POST /browser/eval</code> for DOM access.</td></tr>
+    <tr><td>packages/e2e</td><td>Unified bun-based E2E harness: CLI, API, and WebdriverIO app suites; local Tart VM orchestration; seeded scenarios via <code>SCREENPIPE_E2E_SEED</code>.</td></tr>
+    <tr><td>ee/</td><td>Enterprise tree: <code>desktop-rust/</code> (policy lockdown via Intune/MDM, telemetry sync, direct upload — imported into the app via <code>#[path]</code> behind the <code>enterprise-build</code> feature), <code>sdk/</code> (NAPI-RS embeddable recorder-core with electron/tauri/session/bridges entry points and Swift examples).</td></tr>
+    <tr><td>docker/</td><td>Ubuntu 24.04 + XFCE + VNC container for Linux AT-SPI2 accessibility testing; cloud-pipe runner infra recently moved to org runners (enterprise-build only).</td></tr>
+  </table>
+  <p class="muted" style="font-size:15px">Also in-tree: mintlify docs, six translated READMEs (DE, ES, FR, JA, PT_BR, ZH_CN), and a coverage tracker (COVERAGE.md).</p>
+</section>
+
+<!-- ============================== PRODUCT & DOCS ============================== -->
+<section id="product">
+  <h2><span class="secno">07</span>product &amp; docs</h2>
+  <p>The repo treats product thinking as code. <code>VISION.md</code> pins the principles — stability over features, no feature creep, respect the user's machine (&lt;20% CPU, &lt;3GB RAM, ~20GB storage/month) — and <code>DESIGN.md</code> enforces a strict visual language: black &amp; white geometric minimalism, Space Grotesk / Crimson Text / IBM Plex Mono, 1px borders, zero radius, no emoji. This report follows it.</p>
+  <h3>spec pipeline (docs/)</h3>
+  <table>
+    <tr><th>spec</th><th>state</th><th>summary</th></tr>
+    <tr><td>paired capture</td><td>shipped</td><td>Synchronized screenshot + AX tree with snapshot_path storage and OCR fallback — the architecture in production today.</td></tr>
+    <tr><td>EVENT_DRIVEN_CAPTURE</td><td>in transition</td><td>From 0.5–10 FPS polling to discrete triggers (app-switch, click, typing-pause, idle); debounce 200–500ms, 10s max gap.</td></tr>
+    <tr><td>VISION_PIPELINE v2</td><td>proposed</td><td>Fixes frame-drop race, OCR blocking the capture loop, health misreporting; per-window OCR cache, decoupled video/OCR queues.</td></tr>
+    <tr><td>BATCH_TRANSCRIPTION</td><td>shipped (mode)</td><td>Defer Whisper to idle (CPU &lt;70%, no call app detected); audio always captured live, transcripts backfill chronologically.</td></tr>
+    <tr><td>TIMELINE_VIDEO</td><td>proposed</td><td>Fragmented MP4 served straight to the browser — zero ffmpeg spawns on scroll; &lt;100ms same-chunk seek target.</td></tr>
+    <tr><td>PIPE_EXECUTION</td><td>partially landed</td><td>47 documented edge cases; proposes pipe_executions tables, PID tracking fix, 5-min timeouts — scheduler state is still in-memory.</td></tr>
+  </table>
+  <h3>testing posture</h3>
+  <ul class="facts">
+    <li>1,641 active Rust test blocks across 24 suites (platform splits: 1,596 macOS / 1,544 Windows / 1,533 Linux); 174 test files; 108 ignored/manual.</li>
+    <li>48 mapped E2E specs with 172 test blocks; WebdriverIO app suite with video reporting and a mock-updater harness.</li>
+    <li><code>TESTING.md</code> is a 530+ assertion regression checklist across 11 sections — every entry cites the commit that caused the regression. Required reading before touching windows, tray, monitors, audio, or Apple Intelligence.</li>
+    <li>Dedicated eval CI for audio diarization and meeting detection — model-behavior regressions are gated, not just code.</li>
+  </ul>
+</section>
+
+<!-- ============================== OPERATIONS ============================== -->
+<section id="ops">
+  <h2><span class="secno">08</span>operations &amp; activity</h2>
+  <div class="grid2">
+    <div>
+      <h3>velocity</h3>
+      <ul class="facts">
+        <li>1,102 commits in the last 30 days. Top contributors (60d): Louis Beaumont 2,067, CI automation, Ansh Grover 94.</li>
+        <li>Recent themes: cloud pipes on org runners · unified <code>/artifacts</code> API + brain section · redaction performance (ORT thread-pool fix) · tray "Starting…" fixes · enterprise licensing/Intune · DB disk-I/O wedge recovery · chat UX · OAuth connections (ClickUp, HubSpot, GitHub proxy).</li>
+        <li>Open PRs include Apple SpeechAnalyzer transcription (macOS 26+) and connector OAuth flows.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>ci/cd — 24 workflows</h3>
+      <ul class="facts">
+        <li>Rust CI + frontend tests + bindings drift check; E2E on Windows (Scream audio driver) and macOS (self-hosted + hosted, arm64/x64).</li>
+        <li>Releases: app (pinned to triggering commit), CLI (tags + main), MCP, browser extension, SDK — each its own workflow.</li>
+        <li><code>release-enterprise.yml</code>: Windows .intunewin with EV cert + macOS notarization, manual trigger.</li>
+        <li>Benchmarks, diarization + meeting evals, trufflehog secret scan, docs, auto-cleanup.</li>
+      </ul>
+    </div>
+  </div>
+  <h3>recent security hardening</h3>
+  <ul class="facts">
+    <li>Cloud auth token moved from plaintext settings into the encrypted secret store (PR #3986 / issue #3943).</li>
+    <li>Private-IP-range CORS bypass fixed (#3928); trufflehog secret scanning active in CI.</li>
+  </ul>
+</section>
+
+<!-- ============================== RISKS ============================== -->
+<section id="risks">
+  <h2><span class="secno">09</span>risk register</h2>
+  <p>Consolidated from per-subsystem surveys; ordered by blast radius. Several have spec'd fixes (vision pipeline v2, pipe execution) not yet fully landed.</p>
+
+  <div class="risk"><span class="sev">capture · open</span><b>OCR can block the capture loop</b>
+    <p>process_max_average_frame() runs synchronously inside the capture loop — 2–5s stalls under load; frame hashing false-matches at 320×180 after bursts. Decoupled OCR worker is spec'd (vision v2), not live.</p></div>
+
+  <div class="risk"><span class="sev">capture · open</span><b>frame-drop race + health misreporting</b>
+    <p>frame_write_tracker can silently skip frames that passed OCR; meanwhile /health may report "recording" with last_frame_timestamp 6+ minutes stale — the tray looks green while the pipeline is wedged.</p></div>
+
+  <div class="risk"><span class="sev">audio · open</span><b>coreaudio tap orphaning wedges system audio</b>
+    <p>VisionManager shutdown can orphan the CoreAudio process tap (#3942) requiring a hard relaunch; capture also wedges silently during disk-I/O stalls (#3939). Recovery watchdogs are incomplete. Mic echo cancellation currently disabled in VPIO (#3938).</p></div>
+
+  <div class="risk"><span class="sev">pipes · open</span><b>pipe execution has no timeout and weak PID tracking</b>
+    <p>Hung subprocess blocks the scheduler indefinitely (wait_with_output, no deadline); child PID never written back (ExecutionHandle{pid:0}) so cancellation is unreliable; scheduler last_run is in-memory only and lost on restart.</p></div>
+
+  <div class="risk"><span class="sev">privacy · design</span><b>redaction is eventually-consistent and conservatively configured</b>
+    <p>Async reconciliation means captured text is searchable before redaction catches up, the elements table isn't reconciled yet (#3993), and pii_redaction_labels defaults to ["secret"] only — emails/phones require opt-in.</p></div>
+
+  <div class="risk"><span class="sev">privacy · design</span><b>vault has no recovery; sync key wrap lives in the database</b>
+    <p>Forgotten vault password is unrecoverable by design; the cloud-sync recovery key is stored in the same database it protects, so DB compromise spans recipients.</p></div>
+
+  <div class="risk"><span class="sev">surface · review</span><b>localhost attack surface</b>
+    <p>/cloud_proxy shows no visible auth scoping; the browser extension executes JS in tabs over un-TLS'd localhost WebSocket; Keychain cookie inheritance is readable by any process in the user session.</p></div>
+
+  <div class="risk"><span class="sev">platform · watch</span><b>platform fragmentation tax</b>
+    <p>Three redaction backends (CoreML/DirectML/CPU) need per-platform CI toggles; MLX and Apple Intelligence are Apple-Silicon-only; ONNX runtime strategy differs per OS; Linux accessibility-tree parsing is still a placeholder.</p></div>
+
+  <div class="risk"><span class="sev">build · watch</span><b>dependency-fork and tauri-unstable exposure</b>
+    <p>Five patched upstream forks (cpal, whisper-rs, vad-rs, sck-rs, muda) must track upstream; the app uses Tauri's unstable child-webview feature, a hazard for the next major bump. ee/sdk keeps a separate lockfile — drift risk against core crates.</p></div>
+
+  <div class="risk"><span class="sev">infra · monitor</span><b>cloud pipes just migrated runners</b>
+    <p>Docker infra reverted in favor of org runners (enterprise-build only, commit 8c2bbc7); runner-image stability and cost/resource limits aren't documented yet.</p></div>
+</section>
+
+<footer>
+  <span>screenpipe-hd · hub report · 2026-06-11</span>
+  <span>sources: 6 subsystem surveys + completeness audit · repo @ 1a99c64aa · v2.5.31 / v0.4.17</span>
+</footer>
+
+</div>
+</body>
+</html>
