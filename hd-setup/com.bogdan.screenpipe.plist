@@ -7,7 +7,7 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/bogdanlitvak/projects/Personal/screenpipe/target/release/screenpipe</string>
+        <string>/Users/bogdanlitvak/.local/bin/screenpipe</string>
         <string>record</string>
         <string>--disable-telemetry</string>
         <string>--retention-days</string>

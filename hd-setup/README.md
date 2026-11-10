@@ -1,6 +1,6 @@
 # screenpipe-hd
 
-Personal build-and-run setup for [screenpipe](https://github.com/screenpipe/screenpipe) on this Mac (16 GB Apple Silicon), plus a hub report snapshot of the upstream monorepo.
+Personal build-and-run setup (lives in `hd-setup/` of the fork `halfdecentguy/screenpipe-hd`; formerly the separate `screenpipe-hd-setup` repo) for [screenpipe](https://github.com/screenpipe/screenpipe) on this Mac (16 GB Apple Silicon), plus a hub report snapshot of the upstream monorepo.
 
 ## What's here
 
@@ -17,7 +17,7 @@ cp com.bogdan.screenpipe.plist ~/Library/LaunchAgents/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.bogdan.screenpipe.plist
 ```
 
-The plist expects the binary at `<screenpipe checkout>/target/release/screenpipe`; build it with `update.sh` from the checkout root.
+The plist runs `~/.local/bin/screenpipe`. `hd-setup/update.sh` builds into `target/release/` and installs the signed binary there, so `target/` is a disposable build cache.
 
 ## Why the stable signing identity matters
 

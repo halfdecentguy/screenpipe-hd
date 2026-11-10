@@ -88,7 +88,7 @@ Run ad hoc instead:
 
 ```sh
 ./screenpipe-tray --port 3030 --launchd-label com.bogdan.screenpipe \
-    --engine-bin ~/projects/Personal/screenpipe/target/release/screenpipe \
+    --engine-bin ~/.local/bin/screenpipe \
     --engine-plist ~/Library/LaunchAgents/com.bogdan.screenpipe.plist
 ```
 

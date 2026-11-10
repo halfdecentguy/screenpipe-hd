@@ -6,7 +6,7 @@
 # of upstream. This script never looks at upstream: pulling a new
 # upstream release INTO fork main is a deliberate manual step —
 #
-#   cd ~/projects/Personal/screenpipe
+#   cd ~/projects/Personal/screenpipe-hd
 #   GIT_LFS_SKIP_SMUDGE=1 git fetch https://github.com/screenpipe/screenpipe.git main
 #   git merge FETCH_HEAD        # resolve conflicts if any
 #   git push origin main
@@ -17,9 +17,12 @@
 # of this script for the automated version of that dance.)
 set -euo pipefail
 
-# Fixed path: this script lives in the setup repo, not the checkout.
-REPO_DIR="$HOME/projects/Personal/screenpipe"
+# This script lives in <checkout>/hd-setup/.
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$REPO_DIR/target/release/screenpipe"
+# Installed copy the launchd agents run. Kept outside target/ so cleaning
+# build caches (cargo clean, rm -rf target) never breaks the running setup.
+INSTALLED_BIN="$HOME/.local/bin/screenpipe"
 LABEL="com.bogdan.screenpipe"
 
 cd "$REPO_DIR"
@@ -29,8 +32,8 @@ echo "fetching fork main..."
 GIT_LFS_SKIP_SMUDGE=1 git fetch origin main --quiet
 
 if [ "$(git rev-parse HEAD)" = "$(git rev-parse FETCH_HEAD)" ] \
-    && [ -x "$BIN" ] \
-    && [ "$(stat -f %m "$BIN")" -ge "$(git log -1 --format=%ct HEAD)" ]; then
+    && [ -x "$INSTALLED_BIN" ] \
+    && [ "$(stat -f %m "$INSTALLED_BIN")" -ge "$(git log -1 --format=%ct HEAD)" ]; then
     echo "binary already built from fork main $(git rev-parse --short HEAD) — nothing to do."
     exit 0
 fi
@@ -89,6 +92,13 @@ else
 ############################################################################
 EOR
 fi
+
+# Install via temp file + rename: overwriting a running signed binary in
+# place invalidates its code pages and macOS kills it.
+mkdir -p "$(dirname "$INSTALLED_BIN")"
+cp -f "$BIN" "$INSTALLED_BIN.new"
+mv -f "$INSTALLED_BIN.new" "$INSTALLED_BIN"
+echo "installed $INSTALLED_BIN"
 
 if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
     echo "restarting launchd agent $LABEL..."

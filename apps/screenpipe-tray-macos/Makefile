@@ -6,7 +6,7 @@ BINARY := screenpipe-tray
 PREFIX ?= $(HOME)/.local
 # Engine binary the tray shells out to for `auth token` (launchd agents get a
 # minimal PATH, so the plist needs an absolute path).
-ENGINE_BIN ?= $(HOME)/projects/Personal/screenpipe/target/release/screenpipe
+ENGINE_BIN ?= $(HOME)/.local/bin/screenpipe
 LABEL  := com.bogdan.screenpipe-tray
 AGENT_PLIST := $(HOME)/Library/LaunchAgents/$(LABEL).plist
 
